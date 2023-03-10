@@ -15,6 +15,7 @@ _C.MODEL.REDUCE_LOSS_NORM = True
 _C.MODEL.NORM = 'BN' # group normalization or batch normalization
 
 _C.MODEL.INPLACE_ABN = False
+_C.MODEL.ATTN_NORM = False
 
 # -----------------------------------------------------------------------------
 # INPUT
@@ -148,6 +149,7 @@ _C.MODEL.HEAD.LOSS_PENALTY_ALPHA = 2
 _C.MODEL.HEAD.LOSS_BETA = 4
 
 # 2d offset, 2d dimension
+_C.MODEL.HEAD.NUM_KPT = 10
 _C.MODEL.HEAD.NUM_CHANNEL = 256
 _C.MODEL.HEAD.USE_NORMALIZATION = "BN"
 _C.MODEL.HEAD.REGRESSION_HEADS = [['2d_dim'], ['3d_offset'], ['3d_dim'], ['ori_cls', 'ori_offset'], ['depth']]
