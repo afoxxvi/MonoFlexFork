@@ -15,6 +15,7 @@ from model.layers.utils import select_point_of_interest
 from model.backbone.DCNv2.dcn_v2 import DCNv2
 from model.layers.attentive_norm import AttnBatchNorm2d
 
+from model.layers.coord_conv import CoordConv
 from inplace_abn import InPlaceABN
 
 @registry.PREDICTOR.register("Base_Predictor")
@@ -106,6 +107,56 @@ class _predictor(nn.Module):
                 trunc_norm_func(self.head_conv, momentum=self.bn_momentum), trunc_activision_func, nn.Conv1d(self.head_conv, 2, kernel_size=1),
             )
 
+        # self.register_buffer('offset_std', torch.tensor([20.0244, 8.3567]).view(1,2,1,1))
+        # self.register_buffer('offset_mean', torch.tensor([0.1060, -6.5576]).view(1,2,1,1))
+        self.seprate_depth_channels = cfg.MODEL.HEAD.SEPRATE_DEPTH_CHANNELS
+        self.add_ground_depth = cfg.MODEL.HEAD.ADD_GROUND_DEPTH
+        self.detach_ground_depth = cfg.MODEL.HEAD.DETACH_GROUND_DEPTH
+        self.dilated_ground_depth = cfg.MODEL.HEAD.DILATED_GROUND_DEPTH 
+        ground_depth_output_channel = 2 if not cfg.MODEL.HEAD.GD_XY else 6
+        
+        if cfg.MODEL.HEAD.UNCERTAINTY_ALIGN:
+            if self.add_ground_depth:
+                self.register_buffer('uncertainty_alignment_k', torch.ones(4 + ground_depth_output_channel//2))
+                self.register_buffer('uncertainty_alignment_b', torch.zeros(4 + ground_depth_output_channel//2))
+            else:
+                self.register_buffer('uncertainty_alignment_k', torch.ones(4))
+                self.register_buffer('uncertainty_alignment_b', torch.zeros(4))
+
+        if self.add_ground_depth:
+
+            gd_conv_cls = CoordConv if cfg.MODEL.HEAD.GD_DEPTH_COORD_CONV else nn.Conv2d
+
+            self.ground_depth_predictor = nn.Sequential(
+                gd_conv_cls(in_channels, self.head_conv, kernel_size=3, padding=1, bias=False),
+                # InPlaceABN(self.head_conv, momentum=self.bn_momentum, activation=self.abn_activision) if self.use_inplace_abn else \
+                #     norm_func(self.head_conv, momentum=self.bn_momentum), 
+                nn.BatchNorm2d(self.head_conv), 
+                nn.ReLU(inplace=True),
+                gd_conv_cls(self.head_conv, self.head_conv, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(self.head_conv), 
+                nn.ReLU(inplace=True),
+                gd_conv_cls(self.head_conv, ground_depth_output_channel, kernel_size=1, padding=1 // 2, bias=True)
+                # 2 for ground depth and ground depth uncertainty
+            ) if not self.dilated_ground_depth else \
+                nn.Sequential(
+                gd_conv_cls(in_channels, self.head_conv, kernel_size=3, padding=2, dilation=2, bias=False),
+                nn.BatchNorm2d(self.head_conv), 
+                nn.ReLU(inplace=True),
+                gd_conv_cls(self.head_conv, self.head_conv, kernel_size=3, padding=2, dilation=2, bias=False),
+                nn.BatchNorm2d(self.head_conv), 
+                nn.ReLU(inplace=True),
+                gd_conv_cls(self.head_conv, ground_depth_output_channel, kernel_size=1, padding=1 // 2, bias=True)
+                # 2 for ground depth and ground depth uncertainty
+            )
+            if cfg.MODEL.HEAD.UNCERTAINTY_INIT:
+                torch.nn.init.xavier_normal_(self.ground_depth_predictor[-1].weight[-1], gain=0.01)
+                if cfg.MODEL.HEAD.GD_XY:
+                    torch.nn.init.xavier_normal_(self.ground_depth_predictor[-1].weight[-3], gain=0.01)
+                    torch.nn.init.xavier_normal_(self.ground_depth_predictor[-1].weight[-5], gain=0.01)
+
+                # get the weight of ground depth uncertainty
+
     def _build_head(self, in_channels, out_channels):
         if self.use_inplace_abn:
             return nn.Sequential(
@@ -159,11 +210,16 @@ class _predictor(nn.Module):
 
         output_regs = []
         # output regression
+        reg_feature = self.reg_features[0](features)
+        if self.seprate_depth_channels:
+            reg_fearure_for_depth = self.reg_features[1](features)
         for i, reg_feature_head in enumerate(self.reg_features):
-            reg_feature = reg_feature_head(features)
 
             for j, reg_output_head in enumerate(self.reg_heads[i]):
-                output_reg = reg_output_head(reg_feature)
+                if (i == 6 or i == 7) and self.seprate_depth_channels:
+                    output_reg = reg_output_head(reg_fearure_for_depth)
+                else:
+                    output_reg = reg_output_head(reg_feature)
 
                 # apply edge feature enhancement
                 if self.enable_edge_fusion and i == self.offset_index[0] and j == self.offset_index[1]:
@@ -194,6 +250,10 @@ class _predictor(nn.Module):
         output_cls = sigmoid_hm(output_cls)
         output_regs = torch.cat(output_regs, dim=1)
         output_hm_kpt = sigmoid_hm(output_hm_kpt)
+        if self.add_ground_depth:
+            ground_du = self.ground_depth_predictor(features.detach() if self.detach_ground_depth else features)
+            return {'cls': output_cls, 'reg': output_regs, 'hm_kpt': output_hm_kpt, 'ground_du': ground_du}
+
 
         return {'cls': output_cls, 'reg': output_regs, 'hm_kpt': output_hm_kpt}
 

@@ -421,6 +421,7 @@ def _prepare_data(gt_annos, dt_annos, current_class, difficulty):
     for i in range(len(gt_annos)):
         rets = clean_data(gt_annos[i], dt_annos[i], current_class, difficulty)
         num_valid_gt, ignored_gt, ignored_det, dc_bboxes = rets
+
         ignored_gts.append(np.array(ignored_gt, dtype=np.int64))
         ignored_dets.append(np.array(ignored_det, dtype=np.int64))
         if len(dc_bboxes) == 0:
@@ -450,7 +451,8 @@ def eval_class(gt_annos,
                metric,
                min_overlaps,
                compute_aos=False,
-               num_parts=100):
+               num_parts=100,
+):
     """Kitti eval. support 2d/bev/3d/aos eval. support 0.5:0.05:0.95 coco AP.
     Args:
         gt_annos: dict, must from get_label_annos() in kitti_common.py
@@ -659,6 +661,8 @@ def get_official_eval_result(gt_annos, dt_annos, current_classes, PR_detail_dict
         4: 'Person_sitting',
         5: 'Truck'
     }
+
+    min_overlaps = np.stack([overlap_0_7, overlap_0_5], axis=0)  # [2, 3, num_classes]
 
     name_to_class = {v: n for n, v in class_to_name.items()}
     if not isinstance(current_classes, (list, tuple)):

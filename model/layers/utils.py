@@ -22,7 +22,7 @@ from torch.nn import functional as F
 class Converter_key2channel(object):
      def __init__(self, keys, channels):
          super(Converter_key2channel, self).__init__()
-         
+
          # flatten keys and channels
          self.keys = [key for key_group in keys for key in key_group]
          self.channels = [channel for channel_groups in channels for channel in channel_groups]
@@ -46,7 +46,7 @@ def nms_hm(heat_map, kernel=3, reso=1):
     kernel = int(kernel / reso)
     if kernel % 2 == 0:
         kernel += 1
-    
+
     pad = (kernel - 1) // 2
     hmax = F.max_pool2d(heat_map,
                         kernel_size=(kernel, kernel),
@@ -110,7 +110,7 @@ def _gather_feat(feat, ind):
     Returns:
 
     '''
-    channel = feat.size(-1)                                            
+    channel = feat.size(-1)
     ind = ind.unsqueeze(-1).expand(ind.size(0), ind.size(1), channel)
     feat = feat.gather(1, ind)
 
@@ -143,3 +143,140 @@ def select_point_of_interest(batch, index, feature_maps):
     feature_maps = feature_maps.gather(1, index.long())
 
     return feature_maps
+
+
+def generate_grid(h, w):
+    x = torch.arange(0, h)
+    y = torch.arange(0, w)
+    grid = torch.stack([x.repeat(w), y.repeat(h,1).t().contiguous().view(-1)],1)
+    return grid
+
+
+def soft_get(reg, pts, force_get = False, force_get_uncertainty = False):
+
+    pts_x = pts[:,0]
+    pts_y = pts[:,1]
+
+    h,w = reg.shape[-2], reg.shape[-1]
+    # if force_get:
+    #     pts_x = pts_x.clamp(0, w-1)
+    #     pts_y = pts_y.clamp(0, h-1)
+
+    pts_x_low = pts_x.floor().long()
+    pts_x_high = pts_x.ceil().long()
+
+    pts_y_low = pts_y.floor().long()
+    pts_y_high = pts_y.ceil().long()
+
+
+    valid_idx = (pts_y_low >= 0) & (pts_y_high < h) & (pts_x_low >= 0) & (pts_x_high < w)
+
+    pts_x_low_valid = pts_x_low[valid_idx]
+    pts_x_high_valid = pts_x_high[valid_idx]
+    pts_y_low_valid = pts_y_low[valid_idx]
+    pts_y_high_valid = pts_y_high[valid_idx]
+
+    pts_x = pts_x[valid_idx]
+    pts_y = pts_y[valid_idx]
+
+    rop_lt = reg[..., pts_y_low_valid, pts_x_low_valid]
+    rop_rt = reg[..., pts_y_low_valid, pts_x_high_valid ]
+    rop_ld = reg[..., pts_y_high_valid, pts_x_low_valid]
+    rop_rd = reg[..., pts_y_high_valid, pts_x_high_valid]
+
+    rop_t = (1 - pts_x + pts_x_low_valid) * rop_lt + (1 - pts_x_high_valid + pts_x) * rop_rt
+    rop_d = (1 - pts_x + pts_x_low_valid) * rop_ld + (1 - pts_x_high_valid + pts_x) * rop_rd
+
+    rop = (1 - pts_y + pts_y_low_valid) * rop_t + (1 - pts_y_high_valid + pts_y) * rop_d
+    if force_get and not torch.all(valid_idx):
+        shape = list(rop.shape)
+        shape[-1] = len(valid_idx)
+        rop_force = torch.zeros(*shape, dtype = rop.dtype, device = rop.device)
+        rop_force[..., valid_idx] = rop
+
+        pts_invalid = pts[~valid_idx]
+
+        grid = generate_grid(w, h).to(pts_invalid.device)
+        reg_invalid_all = []
+        for pts_in in pts_invalid:
+            diff = (pts_in - grid)
+            dis = diff[:,0]**2 + diff[:,1]**2
+            closest_idx = dis.argmin()
+
+            reg_invalid_all.append(reg[..., grid[closest_idx,1 ].long(),grid[closest_idx,0 ].long()])
+        reg_invalid_all = torch.stack(reg_invalid_all, dim = -1)
+        rop_force[..., ~valid_idx] = reg_invalid_all.detach()
+        if force_get_uncertainty:
+            # import pdb; pdb.set_trace()
+            # assert rop_force.shape[0] == 2
+            if rop_force.shape[0] == 2:
+                rop_force[1, ~valid_idx] = 30
+            elif rop_force.shape[0] == 6:
+                rop_force[1, ~valid_idx] = 30
+                rop_force[3, ~valid_idx] = 30
+                rop_force[5, ~valid_idx] = 30
+            else:
+                raise NotImplementedError
+        return rop_force, valid_idx
+
+    return rop, valid_idx
+def soft_get_faster(reg, pts):
+    # departure, not fast
+    pts_x = pts[:,0]
+    pts_y = pts[:,1]
+
+    h,w = reg.shape[-2], reg.shape[-1]
+
+    pts_x_low = pts_x.floor().long()
+    pts_x_high = pts_x.ceil().long()
+
+    pts_y_low = pts_y.floor().long()
+    pts_y_high = pts_y.ceil().long()
+
+
+    valid_idx = (pts_y_low >= 0) & (pts_y_high < h) & (pts_x_low >= 0) & (pts_x_high < w)
+
+    pts_x_low = pts_x_low[valid_idx]
+    pts_x_high = pts_x_high[valid_idx]
+    pts_y_low = pts_y_low[valid_idx]
+    pts_y_high = pts_y_high[valid_idx]
+
+    pts_x = pts_x[valid_idx]
+    pts_y = pts_y[valid_idx]
+
+    reg = reg.flatten(-2,-1)
+
+    rop_lt = reg.index_select(-1, pts_y_low * w + pts_x_low)
+    rop_rt = reg.index_select(-1, pts_y_low * w + pts_x_high)
+    rop_ld = reg.index_select(-1, pts_y_high * w + pts_x_low)
+    rop_rd = reg.index_select(-1, pts_y_high * w + pts_x_high)
+
+    # rop_lt = reg[0, pts_y_low, pts_x_low]
+    # rop_rt = reg[0, pts_y_low, pts_x_high ]
+    # rop_ld = reg[0, pts_y_high, pts_x_low]
+    # rop_rd = reg[0, pts_y_high, pts_x_high]
+
+    rop_t = (1 - pts_x + pts_x_low) * rop_lt + (1 - pts_x_high + pts_x) * rop_rt
+    rop_d = (1 - pts_x + pts_x_low) * rop_ld + (1 - pts_x_high + pts_x) * rop_rd
+
+    rop = (1 - pts_y + pts_y_low) * rop_t + (1 - pts_y_high + pts_y) * rop_d
+    return rop, valid_idx
+
+def speed_test_getter():
+    for i in range(100):
+        reg = torch.randn(8, 1, 96, 320)
+        pts = torch.randn((400*30,2))
+        pts[:,0] *= 320
+        pts[:,1] *= 96
+
+        pts *= 1.2
+
+        a1,b1 = soft_get(reg, pts)
+        a2,b2 = soft_get_faster(reg, pts)
+
+        assert torch.all(a1==a2)
+        assert torch.all(b1==b2)
+
+if __name__ == "__main__":
+
+    speed_test_getter()

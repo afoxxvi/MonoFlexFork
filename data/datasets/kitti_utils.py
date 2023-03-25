@@ -1025,7 +1025,7 @@ def approx_proj_center(proj_center, surface_centers, img_size):
         
         return valid_intersects[min_idx], valid_edge[min_idx]
     else:
-        return None
+        return -1, -1
 
 def get_3d_dis(image, objs, calib):
     image = np.array(image)

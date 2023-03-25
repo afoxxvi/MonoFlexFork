@@ -12,6 +12,7 @@ from model.layers.utils import (
 	nms_hm,
 	select_topk,
 	select_point_of_interest,
+	soft_get
 )
 
 from model.layers.utils import Converter_key2channel
@@ -49,6 +50,17 @@ class PostProcessor(nn.Module):
 
 		# use uncertainty to guide the confidence
 		self.uncertainty_as_conf = cfg.TEST.UNCERTAINTY_AS_CONFIDENCE
+		self.dense_depth = cfg.MODEL.HEAD.DENSE_DEPTH
+		self.bot_center = cfg.MODEL.HEAD.BOT_CENTER
+		self.add_ground_depth = cfg.MODEL.HEAD.ADD_GROUND_DEPTH
+		self.using_ground_depth_infer = cfg.MODEL.HEAD.USING_GROUND_DEPTH_INFER
+		self.gd_depth_decode_mode = cfg.MODEL.HEAD.GD_DEPTH_DECODE_MODE
+		self.gd_depth_decode_pos = cfg.MODEL.HEAD.GD_DEPTH_DECODE_POS
+		assert self.gd_depth_decode_pos in ['before', 'after']
+		self.gd_xy = cfg.MODEL.HEAD.GD_XY
+		self.down_ratio = cfg.MODEL.BACKBONE.DOWN_RATIO
+
+		self.only_ground_depth_infer = cfg.MODEL.HEAD.ONLY_GROUND_DEPTH_INFER
 
 	def prepare_targets(self, targets, test):
 		pad_size = torch.stack([t.get_field("pad_size") for t in targets])
@@ -82,6 +94,8 @@ class PostProcessor(nn.Module):
 		calib, pad_size = target_varibales['calib'], target_varibales['pad_size']
 		img_size = target_varibales['size']
 
+		if (self.eval_dis_iou or self.eval_depth) and self.dense_depth:
+			raise NotImplementedError
 		# evaluate the disentangling IoU for each components in (location, dimension, orientation)
 		dis_ious = self.evaluate_3D_detection(target_varibales, pred_regression) if self.eval_dis_iou else None
 
@@ -127,13 +141,124 @@ class PostProcessor(nn.Module):
 		pred_box2d = self.anno_encoder.decode_box2d_fcos(pred_bbox_points, pred_2d_reg, pad_size, img_size)
 		pred_dimensions = self.anno_encoder.decode_dimension(clses, pred_dimensions_offsets)
 
+		if self.add_ground_depth:
+			assert predictions['ground_du'].size(0) == 1
+			ground_du = predictions['ground_du'][0]
+			if self.gd_depth_decode_pos == 'before':
+				ground_du = torch.cat([self.anno_encoder.decode_depth_with_mode(ground_du[:1], self.gd_depth_decode_mode), ground_du[1:]], dim = 0)
+
+			keypoints_locations = pred_bbox_points.view(-1,1,2) + pred_regression_pois[:, self.key2channel('corner_offset')].view(-1, 10, 2)
+			# bot 4 pts, top 4 pts, bot center, top center
+			keypoints_locations_02 = keypoints_locations[:,[0,2],:].view(-1,2)
+			keypoints_locations_13 = keypoints_locations[:,[1,3],:].view(-1,2)
+			keypoints_locations_bot = keypoints_locations[:,8,:]
+
+			pred_ground_du_02, _ = soft_get(ground_du, keypoints_locations_02, force_get = True, force_get_uncertainty=True)
+			pred_ground_du_13, _ = soft_get(ground_du, keypoints_locations_13, force_get = True, force_get_uncertainty=True)
+			pred_ground_du_bot, _ = soft_get(ground_du, keypoints_locations_bot, force_get = True, force_get_uncertainty=True)
+
+			pred_ground_du_02_depth = pred_ground_du_02[0]
+			pred_ground_du_13_depth = pred_ground_du_13[0]
+			pred_ground_du_bot_depth = pred_ground_du_bot[0]
+
+			pred_ground_du_02_uncertainty = pred_ground_du_02[1]
+			pred_ground_du_13_uncertainty = pred_ground_du_13[1]
+			pred_ground_du_bot_uncertainty = pred_ground_du_bot[1]
+
+			if self.gd_xy:
+
+				xxa = target_varibales['calib'][0].P[0,0]
+				xxb = target_varibales['calib'][0].P[0,-1]
+				xxc = target_varibales['calib'][0].P[-1,-1]
+				xxd = target_varibales['calib'][0].P[0,2]
+
+				yya = target_varibales['calib'][0].P[1,1]
+				yyb = target_varibales['calib'][0].P[1,-1]
+				yyc = target_varibales['calib'][0].P[-1,-1]
+				yyd = target_varibales['calib'][0].P[1,2]
+
+				pred_ground_du_02_x = pred_ground_du_02[2]
+				pred_ground_du_13_x = pred_ground_du_13[2]
+				pred_ground_du_bot_x = pred_ground_du_bot[2]
+
+				pred_ground_du_02_x_2d = keypoints_locations_02[:,0] * self.down_ratio -  target_varibales['pad_size'][0][0]
+				pred_ground_du_13_x_2d = keypoints_locations_13[:,0] * self.down_ratio -  target_varibales['pad_size'][0][0]
+				pred_ground_du_bot_x_2d = keypoints_locations_bot[:,0] * self.down_ratio -  target_varibales['pad_size'][0][0]
+
+				pred_ground_du_02_x_uncertainty = pred_ground_du_02[3].view(-1,2).mean(1, keepdim=True)
+				pred_ground_du_13_x_uncertainty = pred_ground_du_13[3].view(-1,2).mean(1, keepdim=True)
+				pred_ground_du_bot_x_uncertainty = pred_ground_du_bot[3]
+
+				ground_depth_from_x_02 = (pred_ground_du_02_x * xxa + xxb - pred_ground_du_02_x_2d * xxc) / (pred_ground_du_02_x_2d - xxd)
+				ground_depth_from_x_13 = (pred_ground_du_13_x * xxa + xxb - pred_ground_du_13_x_2d * xxc) / (pred_ground_du_13_x_2d - xxd)
+				ground_depth_from_x_bot = (pred_ground_du_bot_x * xxa + xxb - pred_ground_du_bot_x_2d * xxc) / (pred_ground_du_bot_x_2d - xxd)
+
+				ground_depth_from_x_02 = ground_depth_from_x_02.view(-1,2).mean(1, keepdim=True)
+				ground_depth_from_x_13 = ground_depth_from_x_13.view(-1,2).mean(1, keepdim=True)
+
+				pred_ground_du_02_y = pred_ground_du_02[4]
+				pred_ground_du_13_y = pred_ground_du_13[4]
+				pred_ground_du_bot_y = pred_ground_du_bot[4]
+
+				pred_ground_du_02_y_2d = keypoints_locations_02[:,1] * self.down_ratio -  target_varibales['pad_size'][0][1]
+				pred_ground_du_13_y_2d = keypoints_locations_13[:,1] * self.down_ratio -  target_varibales['pad_size'][0][1]
+				pred_ground_du_bot_y_2d = keypoints_locations_bot[:,1] * self.down_ratio -  target_varibales['pad_size'][0][1]
+
+				pred_ground_du_02_y_uncertainty = pred_ground_du_02[5].view(-1,2).mean(1, keepdim=True)
+				pred_ground_du_13_y_uncertainty = pred_ground_du_13[5].view(-1,2).mean(1, keepdim=True)
+				pred_ground_du_bot_y_uncertainty = pred_ground_du_bot[5]
+
+
+				ground_depth_from_y_02 = (pred_ground_du_02_y * yya + yyb - pred_ground_du_02_y_2d * yyc) / (pred_ground_du_02_y_2d - yyd)
+				ground_depth_from_y_13 = (pred_ground_du_13_y * yya + yyb - pred_ground_du_13_y_2d * yyc) / (pred_ground_du_13_y_2d - yyd)
+				ground_depth_from_y_bot = (pred_ground_du_bot_y * yya + yyb - pred_ground_du_bot_y_2d * yyc) / (pred_ground_du_bot_y_2d - yyd)
+
+				ground_depth_from_y_02 = ground_depth_from_y_02.view(-1,2).mean(1, keepdim=True)
+				ground_depth_from_y_13 = ground_depth_from_y_13.view(-1,2).mean(1, keepdim=True)
+
+			if self.gd_depth_decode_pos == 'after':
+				pred_ground_du_02_depth = self.anno_encoder.decode_depth_with_mode(pred_ground_du_02_depth, self.gd_depth_decode_mode)
+				pred_ground_du_13_depth = self.anno_encoder.decode_depth_with_mode(pred_ground_du_13_depth, self.gd_depth_decode_mode)
+				pred_ground_du_bot_depth = self.anno_encoder.decode_depth_with_mode(pred_ground_du_bot_depth, self.gd_depth_decode_mode)
+
+			# 2nx2
+			pred_ground_du_02_depth = pred_ground_du_02_depth.view(-1,2).mean(1, keepdim=True)
+			pred_ground_du_13_depth = pred_ground_du_13_depth.view(-1,2).mean(1, keepdim=True)
+
+			pred_ground_du_02_uncertainty = pred_ground_du_02_uncertainty.view(-1,2).mean(1, keepdim=True)
+			pred_ground_du_13_uncertainty = pred_ground_du_13_uncertainty.view(-1,2).mean(1, keepdim=True)
+
+			ground_depths = torch.cat((pred_ground_du_02_depth, pred_ground_du_13_depth, pred_ground_du_bot_depth.view(-1,1)), dim = 1)
+			ground_depths_uncertainty = torch.cat((pred_ground_du_02_uncertainty, pred_ground_du_13_uncertainty, pred_ground_du_bot_uncertainty.view(-1,1)), dim = 1).exp()
+			if self.gd_xy:
+				ground_depths = torch.cat([ground_depths, ground_depth_from_x_02, ground_depth_from_x_13, ground_depth_from_x_bot.view(-1,1),  \
+					ground_depth_from_y_02, ground_depth_from_y_13, ground_depth_from_y_bot.view(-1,1),], dim = 1)
+				ground_depths_uncertainty = torch.cat([ground_depths_uncertainty, \
+					pred_ground_du_02_x_uncertainty, pred_ground_du_13_x_uncertainty, pred_ground_du_bot_x_uncertainty.view(-1,1),\
+					pred_ground_du_02_y_uncertainty, pred_ground_du_13_y_uncertainty, pred_ground_du_bot_y_uncertainty.view(-1,1),], dim = 1)
+
 		if self.pred_direct_depth:
-			pred_depths_offset = pred_regression_pois[:, self.key2channel('depth')].squeeze(-1)
-			pred_direct_depths = self.anno_encoder.decode_depth(pred_depths_offset)
+			if self.dense_depth and not self.add_ground_depth:
+				assert pred_regression.size(0) == 1
+				pred_du_dense = torch.cat( (pred_regression[0, self.key2channel('depth'), :, :], pred_regression[0, self.key2channel('depth_uncertainty'), :, :]), dim = 0)
+				target_center_float = pred_bbox_points + pred_offset_3D
+
+				pred_du_iter, pred_du_valid = soft_get(pred_du_dense, target_center_float, force_get = True)
+				pred_depths_offset = pred_du_iter[0]
+				pred_direct_depths = self.anno_encoder.decode_depth(pred_depths_offset)
+
+				pred_uncertainty = pred_du_iter[1].exp()
+			else:
+				pred_depths_offset = pred_regression_pois[:, self.key2channel('depth')].squeeze(-1)
+				pred_direct_depths = self.anno_encoder.decode_depth(pred_depths_offset)
 
 		if self.depth_with_uncertainty:
-			pred_direct_uncertainty = pred_regression_pois[:, self.key2channel('depth_uncertainty')].exp()
-			visualize_preds['depth_uncertainty'] = pred_regression[:, self.key2channel('depth_uncertainty'), ...].squeeze(1)
+			if self.dense_depth and not self.add_ground_depth:
+				pred_direct_uncertainty = pred_uncertainty.view(-1,1) # it has exped
+				visualize_preds['depth_uncertainty'] = pred_regression[:, self.key2channel('depth_uncertainty'), ...].squeeze(1)
+			else:
+				pred_direct_uncertainty = pred_regression_pois[:, self.key2channel('depth_uncertainty')].exp()
+				visualize_preds['depth_uncertainty'] = pred_regression[:, self.key2channel('depth_uncertainty'), ...].squeeze(1)
 
 		if self.regress_keypoints:
 			pred_keypoint_offset = pred_regression_pois[:, self.key2channel('corner_offset')]
@@ -175,12 +300,20 @@ class PostProcessor(nn.Module):
 		# hard ensemble, soft ensemble and simple average
 		elif self.output_depth in ['hard', 'soft', 'mean', 'oracle']:
 			if self.pred_direct_depth and self.depth_with_uncertainty:
+				if pred_direct_depths.size(0) != pred_keypoints_depths.size(0):
+					import pdb; pdb.set_trace()
 				pred_combined_depths = torch.cat((pred_direct_depths.unsqueeze(1), pred_keypoints_depths), dim=1)
 				pred_combined_uncertainty = torch.cat((pred_direct_uncertainty, pred_keypoint_uncertainty), dim=1)
 			else:
 				pred_combined_depths = pred_keypoints_depths.clone()
 				pred_combined_uncertainty = pred_keypoint_uncertainty.clone()
-			
+			if self.add_ground_depth and self.using_ground_depth_infer:
+				pred_combined_depths = torch.cat((pred_combined_depths, ground_depths), dim = 1)
+				pred_combined_uncertainty = torch.cat((pred_combined_uncertainty, ground_depths_uncertainty), dim = 1)
+			if self.only_ground_depth_infer and self.add_ground_depth and self.using_ground_depth_infer:
+				pred_combined_depths = torch.cat((pred_direct_depths.unsqueeze(1), ground_depths), dim = 1)
+				pred_combined_uncertainty = torch.cat((pred_direct_uncertainty, ground_depths_uncertainty), dim = 1)
+
 			depth_weights = 1 / pred_combined_uncertainty
 			visualize_preds['min_uncertainty'] = depth_weights.argmax(dim=1)
 
@@ -211,8 +344,8 @@ class PostProcessor(nn.Module):
 		batch_idxs = pred_depths.new_zeros(pred_depths.shape[0]).long()
 		pred_locations = self.anno_encoder.decode_location_flatten(pred_bbox_points, pred_offset_3D, pred_depths, calib, pad_size, batch_idxs)
 		pred_rotys, pred_alphas = self.anno_encoder.decode_axes_orientation(pred_orientation, pred_locations)
-
-		pred_locations[:, 1] += pred_dimensions[:, 1] / 2
+		if not self.bot_center:
+			pred_locations[:, 1] += pred_dimensions[:, 1] / 2
 		clses = clses.view(-1, 1)
 		pred_alphas = pred_alphas.view(-1, 1)
 		pred_rotys = pred_rotys.view(-1, 1)
@@ -232,7 +365,7 @@ class PostProcessor(nn.Module):
 		result = torch.cat([clses, pred_alphas, pred_box2d, pred_dimensions, pred_locations, pred_rotys, scores], dim=1)
 		
 		eval_utils = {'dis_ious': dis_ious, 'depth_errors': depth_errors, 'uncertainty_conf': uncertainty_conf,
-					'estimated_depth_error': estimated_depth_error, 'vis_scores': vis_scores}
+					'estimated_depth_error': estimated_depth_error, 'vis_scores': vis_scores, 'ground_du':self.anno_encoder.decode_depth_with_mode(predictions['ground_du'][0][:1], self.gd_depth_decode_mode).detach() if self.add_ground_depth else None}
 		
 		return result, eval_utils, visualize_preds
 
@@ -263,6 +396,9 @@ class PostProcessor(nn.Module):
 			img_dis = torch.sum((box2d_center.reshape(1, 2) - gt_boxes_center) ** 2, dim=1)
 			same_cls_mask = gt_clses == pred_clses[i]
 			img_dis[~same_cls_mask] = 9999
+			if len(img_dis) == 0:
+				# false positive
+				continue
 			near_idx = torch.argmin(img_dis)
 			# iou 2d
 			iou_2d = box_iou(box2d.detach().cpu().numpy(), gt_boxes[near_idx].detach().cpu().numpy())

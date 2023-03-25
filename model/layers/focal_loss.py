@@ -54,17 +54,47 @@ class FocalLoss(nn.Module):
 
         return loss, num_positive
 
+
+class FocalLossv2(nn.Module):
+    def __init__(self, alpha=2, beta=4):
+        super(FocalLossv2, self).__init__()
+        self.alpha = alpha
+        self.beta = beta
+
+    def forward(self, prediction, target):
+        idx = target == 1
+
+        negative_weights = torch.pow(1 - target, self.beta)
+        loss = 0.
+
+        positive_loss = torch.log(prediction) \
+                        * torch.pow(1 - prediction, self.alpha)
+
+        negative_loss = torch.log(1 - prediction) \
+                        * torch.pow(prediction, self.alpha) * negative_weights
+
+        num_positive = idx.sum()
+        positive_loss = positive_loss[idx].sum()
+        negative_loss = negative_loss[~idx].sum()
+
+        loss = - negative_loss - positive_loss
+
+        return loss, num_positive
+
+
 if __name__ == '__main__':
     focal_1 = Vanilla_FocalLoss(alpha=0.5)
     focal_2 = FocalLoss()
+    focal_3 = FocalLossv2()
 
     pred = torch.rand(20)
     target = torch.randint(low=0, high=2, size=(20, 1)).view(-1)
 
     loss1 = focal_1(pred, target) * 2
     loss2 = focal_2(pred, target)
+    loss3 = focal_3(pred, target)
 
-    print(loss1, loss2)
+    print(loss1, loss2, loss3)
 
 
 

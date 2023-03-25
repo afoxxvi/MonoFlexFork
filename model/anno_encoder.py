@@ -139,6 +139,21 @@ class Anno_Encoder():
 
 			return depth
 
+		def decode_depth_with_mode(self, depths_offset, mode):
+			if mode == 'exp':
+				depth = depths_offset.exp()
+			elif mode == 'linear':
+				depth = depths_offset * self.depth_ref[1] + self.depth_ref[0]
+			elif mode == 'inv_sigmoid':
+				depth = 1 / torch.sigmoid(depths_offset) - 1
+			else:
+				raise ValueError
+
+			if self.depth_range is not None:
+				depth = torch.clamp(depth, min=self.depth_range[0], max=self.depth_range[1])
+
+			return depth
+
 		def decode_location_flatten(self, points, offsets, depths, calibs, pad_size, batch_idxs):
 			batch_size = len(calibs)
 			gts = torch.unique(batch_idxs, sorted=True).tolist()

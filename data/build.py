@@ -32,10 +32,26 @@ def build_dataset(cfg, transforms, dataset_catalog, is_train=True):
             "dataset_list should be a list of strings, got {}".format(dataset_list)
         )
     datasets = []
-    for dataset_name in dataset_list:
-        data = dataset_catalog.get(dataset_name)
+
+    if cfg.DATASETS.FAST and is_train:
+        assert len(dataset_list) == 1
+
+        data = dataset_catalog.get('simple')
         factory = getattr(D, data["factory"])
         args = data["args"]
+
+        args["cfg"] = cfg
+        args["is_train"] = is_train
+        args["transforms"] = transforms
+        # make dataset from factory
+        dataset = factory(**args)
+        datasets.append(dataset)
+
+    else:
+        for dataset_name in dataset_list:
+            data = dataset_catalog.get(dataset_name)
+            factory = getattr(D, data["factory"])
+            args = data["args"]
 
         args["cfg"] = cfg
         args["is_train"] = is_train

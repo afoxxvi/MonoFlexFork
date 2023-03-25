@@ -15,7 +15,7 @@ from data.datasets.evaluation import generate_kitti_3d_detection
 from .visualize_infer import show_image_with_boxes, show_image_with_boxes_test
 
 def compute_on_dataset(model, data_loader, device, predict_folder, timer=None, vis=False, 
-                        eval_score_iou=False, eval_depth=False, eval_trunc_recall=False):
+                        eval_score_iou=False, eval_depth=False, eval_trunc_recall=False, vis_test = False):
     
     model.eval()
     cpu_device = torch.device("cpu")
@@ -49,6 +49,8 @@ def compute_on_dataset(model, data_loader, device, predict_folder, timer=None, v
 
             if vis: show_image_with_boxes(vis_target.get_field('ori_img'), output, vis_target, 
                                     visualize_preds, vis_scores=eval_utils['vis_scores'])
+            if vis_test: show_image_with_boxes_test(vis_target.get_field('ori_img'),output,vis_target,
+            visualize_preds, os.path.join(predict_folder, image_ids[0] + '.png'))
 
             # generate txt files for predicted objects
             predict_txt = image_ids[0] + '.txt'
@@ -72,13 +74,14 @@ def inference(
         metrics=['R40'],
         vis=False,
         eval_score_iou=False,
+        vis_test = False,
 ):
     device = torch.device(device)
     num_devices = comm.get_world_size()
     logger = logging.getLogger("monoflex.inference")
     dataset = data_loader.dataset
     logger.info("Start evaluation on {} dataset({} images).".format(dataset_name, len(dataset)))
-    predict_folder = os.path.join(output_folder, 'data')
+    predict_folder = os.path.join(output_folder, 'val/label_2')
     os.makedirs(predict_folder, exist_ok=True)
 
     total_timer = Timer()
@@ -86,7 +89,7 @@ def inference(
     total_timer.tic()
 
     dis_ious = compute_on_dataset(model, data_loader, device, predict_folder, 
-                                inference_timer, vis, eval_score_iou)
+                                inference_timer, vis, eval_score_iou, vis_test=vis_test)
     comm.synchronize()
 
     for key, value in dis_ious.items():
@@ -112,13 +115,13 @@ def inference(
 
     logger.info('Finishing generating predictions, start evaluating ...')
     ret_dicts = []
-    
+
     for metric in metrics:
-        result, ret_dict = evaluate_python(label_path=dataset.label_dir, 
+        result, ret_dict = evaluate_python(label_path=dataset.label_dir,
                                         result_path=predict_folder,
                                         label_split_file=dataset.imageset_txt,
                                         current_class=dataset.classes,
-                                        metric=metric)
+                                        metric=metric,)
 
         logger.info('metric = {}'.format(metric))
         logger.info('\n' + result)

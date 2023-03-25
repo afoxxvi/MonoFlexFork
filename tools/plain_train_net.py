@@ -113,6 +113,9 @@ def main(args):
     distributed = comm.get_world_size() > 1
     if not distributed: cfg.MODEL.USE_SYNC_BN = False
 
+    if args.output_depth is not None:
+        assert args.output_depth in ['oracle', 'hard', 'soft', 'mean', 'direct', 'keypoints_center', 'keypoints_02', 'keypoints_13']
+        cfg.MODEL.HEAD.OUTPUT_DEPTH = args.output_depth
     model = KeypointDetector(cfg)
     device = torch.device(cfg.MODEL.DEVICE)
     model.to(device)
@@ -125,6 +128,15 @@ def main(args):
         _ = checkpointer.load(ckpt, use_latest=args.ckpt is None)
 
         return run_test(cfg, checkpointer.model, vis=args.vis, eval_score_iou=args.eval_score_iou, eval_all_depths=args.eval_all_depths)
+
+    if args.test:
+        checkpointer = DetectronCheckpointer(
+            cfg, model, save_dir=cfg.OUTPUT_DIR
+        )
+        ckpt = cfg.MODEL.WEIGHT if args.ckpt is None else args.ckpt
+        _ = checkpointer.load(ckpt, use_latest=args.ckpt is None)
+
+        return run_test(cfg, checkpointer.model, vis=args.vis, eval_score_iou=args.eval_score_iou, eval_all_depths=args.eval_all_depths, vis_test = True)
 
     if distributed:
         # convert BN to SyncBN

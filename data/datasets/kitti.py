@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
+from math import ceil
 
 import matplotlib.pyplot as plt
 
@@ -54,6 +55,7 @@ class KITTIDataset(Dataset):
         self.num_classes = len(self.classes)
         self.num_kpt = cfg.MODEL.HEAD.NUM_KPT
         self.num_samples = len(self.image_files)
+        self.depth_threshold = 60
 
         # whether to use right-view image
         self.use_right_img = cfg.DATASETS.USE_RIGHT_IMAGE & is_train
@@ -99,6 +101,45 @@ class KITTIDataset(Dataset):
 
         self.logger = logging.getLogger("monoflex.dataset")
         self.logger.info("Initializing KITTI {} set with {} files loaded.".format(self.split, self.num_samples))
+
+        self.kitti_type = cfg.DATASETS.KITTI_TYPE
+        self.dense_depth = cfg.MODEL.HEAD.DENSE_DEPTH or cfg.MODEL.HEAD.ADD_GROUND_DEPTH
+        self.dense_depth_sample_num = cfg.MODEL.HEAD.DENSE_DEPTH_SAMPLE_NUM
+
+        self.sampling_method = cfg.MODEL.HEAD.DENSE_DEPTH_SAMPLING_METHOD
+        self.sampling_num_type = cfg.MODEL.HEAD.DENSE_DEPTH_SAMPLING_NUM_TYPE
+
+        self.dense_sparse = cfg.MODEL.HEAD.DENSE_SPARSE
+        if self.dense_sparse:
+            self.dense_depth_sample_num = 1
+        # if self.dense_depth:
+        #     assert not self.consider_outside_objs
+
+        self.bot_center = cfg.MODEL.HEAD.BOT_CENTER
+        self.only_five_gdpts = cfg.MODEL.HEAD.ONLY_FIVE_GDPTS
+        self.gd_xy = cfg.MODEL.HEAD.GD_XY
+
+        assert self.kitti_type in ['ground', 'original']
+
+        self.max_area = 5500
+        
+        self.x_min = -43.58
+        self.y_min = -0.15
+        self.z_min = 5.29
+        self.x_max = 39.86
+        self.y_max = 3.78
+        self.z_max = 86.18
+        self.type_id_conversion = {
+            'Car': 0,
+            'Pedestrian': 1,
+            'Cyclist': 2,
+            'Van': -4,
+            'Truck': -4,
+            'Person_sitting': -2,
+            'Tram': -99,
+            'Misc': -99,
+            'DontCare': -1,
+        }
 
     def __len__(self):
         if self.use_right_img:
@@ -204,10 +245,10 @@ class KITTIDataset(Dataset):
 
     def filtrate_objects(self, obj_list):
         """
-		Discard objects which are not in self.classes (or its similar classes)
-		:param obj_list: list
-		:return: list
-		"""
+        Discard objects which are not in self.classes (or its similar classes)
+        :param obj_list: list
+        :return: list
+        """
         type_whitelist = self.classes
         valid_obj_list = []
         for obj in obj_list:
@@ -230,8 +271,54 @@ class KITTIDataset(Dataset):
 
         return Image.fromarray(ret_img.astype(np.uint8)), pad_size
 
-    def __getitem__(self, idx):
+    def ploy_area(self, x,y):
+        return 0.5*np.abs(np.dot(x,np.roll(y,1))-np.dot(y,np.roll(x,1)))
 
+    def show_img_bbox(self, img, pts, pad_size = None, color = [0,255,0], radius = 7):
+        import cv2
+        img_np = np.array(img)
+        if pad_size is not None:
+            pts[:,0] += pad_size[0]
+            pts[:,1] += pad_size[1]
+        for (x,y) in pts:
+            img_np = cv2.circle(img_np, (int(x),int(y)), radius, color, -1)
+        cv2.imwrite('tmp.png', img_np[:,:,[2,1,0]])
+
+    def interp_corners3d(self, ground_corners3d, num_interp_x=100, num_interp_y=100, sampling_method = 'grid', sampling_num_type = 'fixed', ground_corners2d=None, down_ratio = 4):
+        assert len(ground_corners3d) == 4
+        assert sampling_method in ['grid', 'random']
+        assert sampling_num_type in ['fixed', 'area']
+        if sampling_method == 'grid' and sampling_num_type == 'fixed':
+            sampling_points = np.dstack(np.meshgrid(np.linspace(0,1,num_interp_x),np.linspace(0,1,num_interp_y))).reshape(-1,2)
+        elif sampling_method == 'random' and sampling_num_type == 'fixed':
+            sampling_points = np.random.uniform(size = (num_interp_x * num_interp_y - 5, 2))
+            sampling_points = np.concatenate([sampling_points, np.array([[0.5,0.5], [1.,1.], [0.,0.], [1.,0.], [0.,1.],])], axis = 0)
+        elif sampling_method == 'random' and sampling_num_type == 'area':
+            area = self.ploy_area(ground_corners2d[:,0], ground_corners2d[:,1])
+            area /= (down_ratio * down_ratio)
+            if area > self.max_area:
+                area = self.max_area # 1600 * 928 / 32 / 32
+            if area < 5:
+                sampling_points = np.array([[0.5,0.5], [1.,1.], [0.,0.], [1.,0.], [0.,1.],])
+            else:
+                sampling_points = np.random.uniform(size = (ceil(area) - 5, 2))
+                sampling_points = np.concatenate([sampling_points, np.array([[0.5,0.5], [1.,1.], [0.,0.], [1.,0.], [0.,1.],])], axis = 0)
+        else:
+            raise NotImplementedError
+        if self.only_five_gdpts:
+            sampling_points = np.array([[0.5,0.5], [1.,1.], [0.,0.], [1.,0.], [0.,1.],])
+        # num_interp_x * num_interp_y * 2
+        x_vector = ground_corners3d[1] - ground_corners3d[0]
+        z_vector = ground_corners3d[3] - ground_corners3d[0]
+
+        base = np.stack([x_vector, z_vector])
+        # vector from x and z directions
+
+        sampled_pts = sampling_points @ base + ground_corners3d[0]
+
+        return sampled_pts
+
+    def original_getitem(self, idx):
         if idx >= self.num_samples:
             # utilize right color image
             idx = idx % self.num_samples
@@ -263,7 +350,7 @@ class KITTIDataset(Dataset):
             use_right_img = False
 
         original_idx = self.image_files[idx][:6]
-        objs = self.filtrate_objects(objs)  # remove objects of irrelevant classes
+        objs = self.filtrate_objects(objs) # remove objects of irrelevant classes
 
         # random horizontal flip
         if self.augmentation is not None:
@@ -333,11 +420,14 @@ class KITTIDataset(Dataset):
         occlusions = np.zeros(self.max_objs)
         truncations = np.zeros(self.max_objs)
 
-        if self.orientation_method == 'head-axis':
-            orientations = np.zeros([self.max_objs, 3], dtype=np.float32)
-        else:
-            orientations = np.zeros([self.max_objs, self.multibin_size * 2],
-                                    dtype=np.float32)  # multi-bin loss: 2 cls + 2 offset
+        if self.dense_depth:
+            num_pts_for_init = self.max_area if self.sampling_num_type == 'area' else self.dense_depth_sample_num * self.dense_depth_sample_num
+            num_per_pts = 3 if not self.gd_xy else 5
+            dense_depth_pts = np.zeros([self.max_objs, num_pts_for_init,  num_per_pts], dtype=np.float32) - 1
+            # u,v and z
+
+        if self.orientation_method == 'head-axis': orientations = np.zeros([self.max_objs, 3], dtype=np.float32)
+        else: orientations = np.zeros([self.max_objs, self.multibin_size * 2], dtype=np.float32) # multi-bin loss: 2 cls + 2 offset
 
         reg_mask = np.zeros([self.max_objs], dtype=np.uint8)  # regression mask
         trunc_mask = np.zeros([self.max_objs], dtype=np.uint8)  # outside object mask
@@ -345,7 +435,7 @@ class KITTIDataset(Dataset):
 
         for i, obj in enumerate(objs):
             cls = obj.type
-            cls_id = TYPE_ID_CONVERSION[cls]
+            cls_id = self.type_id_conversion[cls]
             if cls_id < 0: continue
 
             # TYPE_ID_CONVERSION = {
@@ -360,14 +450,16 @@ class KITTIDataset(Dataset):
             #     'DontCare': -1,
             # }
 
-            float_occlusion = float(
-                obj.occlusion)  # 0 for normal, 0.33 for partially, 0.66 for largely, 1 for unknown (mostly very far and small objs)
+            float_occlusion = float(obj.occlusion)  # 0 for normal, 0.33 for partially, 0.66 for largely, 1 for unknown (mostly very far and small objs)
             float_truncation = obj.truncation  # 0 ~ 1 and stands for truncation level
 
             # bottom centers ==> 3D centers
             locs = obj.t.copy()
+            if not self.bot_center:
+                locs[1] = locs[1] - obj.h / 2
             locs[1] = locs[1] - obj.h / 2
             if locs[-1] <= 0: continue  # objects which are behind the image
+            if locs[-1] > self.depth_threshold: continue # objects too far
 
             # generate 8 corners of 3d bbox
             corners_3d = obj.generate_corners3d()
@@ -400,8 +492,9 @@ class KITTIDataset(Dataset):
 
                     center_2d = (box2d[:2] + box2d[2:]) / 2
                     if self.proj_center_mode == 'intersect':
-                        target_proj_center, edge_index = approx_proj_center(proj_center, center_2d.reshape(1, 2),
-                                                                            (img_w, img_h))
+                        target_proj_center, edge_index = approx_proj_center(proj_center, center_2d.reshape(1, 2), (img_w, img_h))
+                        if isinstance(target_proj_center, int) and target_proj_center == -1 and isinstance(edge_index, int) and edge_index == -1:
+                            continue
                     else:
                         raise NotImplementedError
                 else:
@@ -486,9 +579,9 @@ class KITTIDataset(Dataset):
                             hm_kpt[k_idx] = draw_umich_gaussian(hm_kpt[k_idx], keypoints_2D[k_idx],
                                                                 max(0, int(gaussian_radius(bbox_dim[1], bbox_dim[0]))))
                 # if keypoints[i, k_idx][2] == 1:
-                # 	draw_umich_gaussian(hm_kpt[k_idx], keypoints[i, k_idx], max(0, int(gaussian_radius(bbox_dim[1], bbox_dim[0]))))
+                #     draw_umich_gaussian(hm_kpt[k_idx], keypoints[i, k_idx], max(0, int(gaussian_radius(bbox_dim[1], bbox_dim[0]))))
                 # else:
-                # 	draw_umich_gaussian_2D(hm_kpt[k_idx], keypoints[i, k_idx], radius_x, radius_y)
+                #     draw_umich_gaussian_2D(hm_kpt[k_idx], keypoints[i, k_idx], radius_x, radius_y)
                 else:
                     # for inside objects, generate circular heatmap
                     radius = gaussian_radius(bbox_dim[1], bbox_dim[0])
@@ -519,14 +612,32 @@ class KITTIDataset(Dataset):
                 orientations[i] = self.encode_alpha_multibin(alpha, num_bin=self.multibin_size)
 
                 reg_mask[i] = 1
-                reg_weight[i] = 1  # all objects are of the same weights (for now)
-                trunc_mask[i] = int(approx_center)  # whether the center is truncated and therefore approximate
+                reg_weight[i] = 1 # all objects are of the same weights (for now)
+                trunc_mask[i] = int(approx_center) # whether the center is truncated and therefore approximate
                 occlusions[i] = float_occlusion
                 truncations[i] = float_truncation
+                if self.dense_depth:
+                    interped_corners3d_bot = self.interp_corners3d(corners_3d[:4], self.dense_depth_sample_num, self.dense_depth_sample_num, sampling_method = self.sampling_method, sampling_num_type = self.sampling_num_type, ground_corners2d= calib.project_rect_to_image(corners_3d[:4])[0], down_ratio = self.down_ratio)
+                    if self.dense_sparse:
+                        interped_corners3d_bot = self.interp_corners3d(corners_3d[:4], 21, 21)
+                        interped_corners3d_bot = interped_corners3d_bot[len(interped_corners3d_bot)//2:len(interped_corners3d_bot)//2+1]
+                        assert len(interped_corners3d_bot) == 1
+                        assert interped_corners3d_bot[0,-1] == locs[-1], print(interped_corners3d_bot, locs)
+                    # print(interped_corners3d_bot[len(interped_corners3d_bot)//2] - locs, locs, interped_corners3d_bot[len(interped_corners3d_bot)//2])
+                    interped_corners2d_bot, _ = calib.project_rect_to_image(interped_corners3d_bot)
+                    interped_corners2d_bot = (interped_corners2d_bot + pad_size) / self.down_ratio
+                    valid = (interped_corners2d_bot[:,0] >=0 ) & (interped_corners2d_bot[:,0] <= img.size[0] / 4 - 1 ) & \
+                            (interped_corners2d_bot[:,1] >=0 ) & (interped_corners2d_bot[:,1] <= img.size[1] / 4 - 1 ) & \
+                            (interped_corners3d_bot[:,2] > 0)
+                    interped_corners2d_bot = interped_corners2d_bot[valid]
+                    interped_corners3d_bot = interped_corners3d_bot[valid]
+
+                    tobecopy_3d = interped_corners3d_bot if self.gd_xy else interped_corners3d_bot[:,2:]
+                    dense_depth_pts[i, : len(interped_corners2d_bot), :] = np.concatenate([interped_corners2d_bot, tobecopy_3d], axis = 1)
 
         # visualization
         # img3 = show_image_with_boxes(img, cls_ids, target_centers, bboxes.copy(), keypoints, reg_mask,
-        # 							offset_3D, self.down_ratio, pad_size, orientations, vis=True)
+        #                             offset_3D, self.down_ratio, pad_size, orientations, vis=True)
         # show_heatmap(img, hm_kpt, index=original_idx)
         # show_heatmap(img, hm_kpt, classes=range(10))
 
@@ -558,7 +669,335 @@ class KITTIDataset(Dataset):
         if self.enable_edge_fusion:
             target.add_field('edge_len', input_edge_count)
             target.add_field('edge_indices', input_edge_indices)
+        if self.dense_depth:
+            target.add_field('dense_depth_pts', dense_depth_pts)
 
         if self.transforms is not None: img, target = self.transforms(img, target)
 
         return img, target, original_idx
+
+
+    def get_points_pair(self, obj, index = 0):
+        corners_3d = obj.generate_corners3d()
+        # zs = corners_3d[:4,-1]
+        # z_order = np.argsort(zs)
+
+        assert index in [0,1,2,3,4]
+
+        corners_3d_bot = corners_3d[:4]
+        corners_3d_top = corners_3d[:4]
+
+
+        if index == 0:
+            return np.stack((corners_3d[:4].mean(axis=0), corners_3d[4:].mean(axis=0)), axis=0)
+        else:
+            return np.stack((corners_3d_bot[index-1], corners_3d_top[index-1]), axis=0)
+
+
+    def run_one(self, objs, pt_index, target, calib, img_w, img_h, pad_size):
+        # import pdb; pdb.set_trace()
+        # heatmap
+        heat_map = np.zeros([self.num_classes, self.output_height, self.output_width], dtype=np.float32)
+        hm_kpt = np.zeros([self.num_kpt, self.output_height, self.output_width], dtype=np.float32)
+        # classification
+        cls_ids = np.zeros([self.max_objs], dtype=np.int32)
+        target_centers = np.zeros([self.max_objs, 2], dtype=np.int32)
+        # 2d bounding boxes
+        gt_bboxes = np.zeros([self.max_objs, 4], dtype=np.float32)
+        bboxes = np.zeros([self.max_objs, 4], dtype=np.float32)
+        # keypoints: 2d coordinates and visible(0/1)
+        keypoints = np.zeros([self.max_objs, 2], dtype=np.float32)
+        # 3d dimension
+        dimensions = np.zeros([self.max_objs, 3], dtype=np.float32)
+        # 3d location
+        locations = np.zeros([self.max_objs, 3], dtype=np.float32)
+        # rotation y
+        rotys = np.zeros([self.max_objs], dtype=np.float32)
+        # alpha (local orientation)
+        alphas = np.zeros([self.max_objs], dtype=np.float32)
+        # offsets from center to expected_center
+        offset_3D = np.zeros([self.max_objs, 2], dtype=np.float32)
+
+        # occlusion and truncation
+        occlusions = np.zeros(self.max_objs)
+        truncations = np.zeros(self.max_objs)
+
+        if self.orientation_method == 'head-axis': orientations = np.zeros([self.max_objs, 3], dtype=np.float32)
+        else: orientations = np.zeros([self.max_objs, self.multibin_size * 2], dtype=np.float32) # multi-bin loss: 2 cls + 2 offset
+
+        reg_mask = np.zeros([self.max_objs], dtype=np.uint8) # regression mask
+        trunc_mask = np.zeros([self.max_objs], dtype=np.uint8) # outside object mask
+        reg_weight = np.zeros([self.max_objs], dtype=np.float32) # regression weight
+
+        for i, obj in enumerate(objs):
+            cls = obj.type
+            cls_id = self.type_id_conversion[cls]
+            if cls_id < 0: continue
+
+            float_occlusion = float(obj.occlusion) # 0 for normal, 0.33 for partially, 0.66 for largely, 1 for unknown (mostly very far and small objs)
+            float_truncation = obj.truncation # 0 ~ 1 and stands for truncation level
+
+
+            bot_top_pair = self.get_points_pair(obj, pt_index)
+            # bottom centers ==> 3D centers
+            locs = bot_top_pair[0].copy()
+            # locs[1] = locs[1] - obj.h / 2
+            if locs[-1] <= 0: continue
+            if locs[-1] > self.depth_threshold: continue
+
+            # generate 8 corners of 3d bbox
+            corners_3d = obj.generate_corners3d()
+            corners_2d, _ = calib.project_rect_to_image(corners_3d)
+            projected_box2d = np.array([corners_2d[:, 0].min(), corners_2d[:, 1].min(),
+                                        corners_2d[:, 0].max(), corners_2d[:, 1].max()])
+
+            if projected_box2d[0] >= 0 and projected_box2d[1] >= 0 and \
+                    projected_box2d[2] <= img_w - 1 and projected_box2d[3] <= img_h - 1:
+                box2d = projected_box2d.copy()
+            else:
+                box2d = obj.box2d.copy()
+
+            # filter some unreasonable annotations
+            if self.filter_annos:
+                if float_truncation >= self.filter_params[0] and (box2d[2:] - box2d[:2]).min() <= self.filter_params[1]: continue
+
+            # project 3d location to the image plane
+
+            proj_center, depth = calib.project_rect_to_image(locs.reshape(-1, 3))
+            proj_center = proj_center[0]
+
+            # generate approximate projected center when it is outside the image
+            proj_inside_img = (0 <= proj_center[0] <= img_w - 1) & (0 <= proj_center[1] <= img_h - 1)
+
+            approx_center = False
+            if not proj_inside_img:
+                if self.consider_outside_objs:
+                    approx_center = True
+
+                    center_2d = (box2d[:2] + box2d[2:]) / 2
+                    if self.proj_center_mode == 'intersect':
+                        target_proj_center, edge_index = approx_proj_center(proj_center, center_2d.reshape(1, 2), (img_w, img_h))
+                    else:
+                        raise NotImplementedError
+                else:
+                    continue
+            else:
+                target_proj_center = proj_center.copy()
+
+            # 10 keypoints
+            keypoints_2D, _ = calib.project_rect_to_image(bot_top_pair[1:])
+
+            # downsample bboxes, points to the scale of the extracted feature map (stride = 4)
+            keypoints_2D = (keypoints_2D + pad_size.reshape(1, 2)) / self.down_ratio
+            target_proj_center = (target_proj_center + pad_size) / self.down_ratio
+            proj_center = (proj_center + pad_size) / self.down_ratio
+
+            box2d[0::2] += pad_size[0]
+            box2d[1::2] += pad_size[1]
+            box2d /= self.down_ratio
+            # 2d bbox center and size
+            bbox_center = (box2d[:2] + box2d[2:]) / 2
+            bbox_dim = box2d[2:] - box2d[:2]
+
+            # target_center: the point to represent the object in the downsampled feature map
+            if self.heatmap_center == '2D':
+                target_center = bbox_center.round().astype(np.int)
+            else:
+                target_center = target_proj_center.round().astype(np.int)
+
+            # clip to the boundary
+
+            # target_center[0] = np.clip(target_center[0], x_min, x_max)
+            # target_center[1] = np.clip(target_center[1], y_min, y_max)
+
+            pred_2D = True # In fact, there are some wrong annotations where the target center is outside the box2d
+            if not (target_center[0] >= box2d[0] and target_center[1] >= box2d[1] and target_center[0] <= box2d[2] and target_center[1] <= box2d[3]):
+                pred_2D = False
+
+            if (bbox_dim > 0).all() and (0 <= target_center[0] <= self.output_width - 1) and (0 <= target_center[1] <= self.output_height - 1):
+                rot_y = obj.ry
+                alpha = obj.alpha
+
+                # generating heatmap
+                if self.adjust_edge_heatmap and approx_center:
+                    # for outside objects, generate 1-dimensional heatmap
+                    bbox_width = min(target_center[0] - box2d[0], box2d[2] - target_center[0])
+                    bbox_height = min(target_center[1] - box2d[1], box2d[3] - target_center[1])
+                    radius_x, radius_y = bbox_width * self.edge_heatmap_ratio, bbox_height * self.edge_heatmap_ratio
+                    radius_x, radius_y = max(0, int(radius_x)), max(0, int(radius_y))
+                    assert min(radius_x, radius_y) == 0
+                    heat_map[cls_id] = draw_umich_gaussian_2D(heat_map[cls_id], target_center, radius_x, radius_y)
+                    for k_idx in range(len(keypoints[i])):
+                        if keypoints[i, k_idx][2] == 1:
+                            hm_kpt[k_idx] = draw_umich_gaussian(hm_kpt[k_idx], keypoints_2D[k_idx],
+                                                                max(0, int(gaussian_radius(bbox_dim[1], bbox_dim[0]))))
+                else:
+                    # for inside objects, generate circular heatmap
+                    radius = gaussian_radius(bbox_dim[1], bbox_dim[0])
+                    radius = max(0, int(radius))
+                    heat_map[cls_id] = draw_umich_gaussian(heat_map[cls_id], target_center, radius)
+                    for k_idx in range(len(keypoints_2D)):
+                        kpt = keypoints[i, k_idx]
+                        kptx, kpty = kpt[0], kpt[1]
+                        kptx_int, kpty_int = int(kptx), int(kpty)
+                        hm_kpt[k_idx] = draw_umich_gaussian(hm_kpt[k_idx], keypoints_2D[k_idx], radius)
+
+                cls_ids[i] = cls_id
+                target_centers[i] = target_center
+                # offset due to quantization for inside objects or offset from the interesection to the projected 3D center for outside objects
+                offset_3D[i] = proj_center - target_center
+
+                # 2D bboxes
+                gt_bboxes[i] = obj.box2d.copy() # for visualization
+                if pred_2D: bboxes[i] = box2d
+
+                # local coordinates for keypoints
+                keypoints[i] = (keypoints_2D - target_center.reshape(1,2))
+
+                dimensions[i] = np.array([obj.l, obj.h, obj.w])
+                locations[i] = locs
+                rotys[i] = rot_y
+                alphas[i] = alpha
+
+                orientations[i] = self.encode_alpha_multibin(alpha, num_bin=self.multibin_size)
+
+                reg_mask[i] = 1
+                reg_weight[i] = 1 # all objects are of the same weights (for now)
+                trunc_mask[i] = int(approx_center) # whether the center is truncated and therefore approximate
+                occlusions[i] = float_occlusion
+                truncations[i] = float_truncation
+                if pt_index == 1:
+                    self.check_runone(keypoints[i], dimensions[i], locations[i], offset_3D[i], orientations[i], heat_map)
+
+
+
+        target.add_field("cls_ids_"+str(pt_index), cls_ids)
+        target.add_field("target_centers_"+str(pt_index), target_centers)
+        target.add_field("keypoints_"+str(pt_index), keypoints)
+        target.add_field("dimensions_"+str(pt_index), dimensions)
+        target.add_field("locations_"+str(pt_index), locations)
+        target.add_field("reg_mask_"+str(pt_index), reg_mask)
+        target.add_field("reg_weight_"+str(pt_index), reg_weight)
+        target.add_field("offset_3D_"+str(pt_index), offset_3D)
+        target.add_field("2d_bboxes_"+str(pt_index), bboxes)
+        target.add_field("rotys_"+str(pt_index), rotys)
+        target.add_field("trunc_mask_"+str(pt_index), trunc_mask)
+        target.add_field("alphas_"+str(pt_index), alphas)
+        target.add_field("orientations_"+str(pt_index), orientations)
+        target.add_field("hm_"+str(pt_index), heat_map)
+        target.add_field("hm_kpt_"+str(pt_index), hm_kpt)
+        target.add_field("gt_bboxes_"+str(pt_index), gt_bboxes) # for validation visualization
+        target.add_field("occlusions_"+str(pt_index), occlusions)
+        target.add_field("truncations_"+str(pt_index), truncations)
+
+    def check_runone(self, keypoints, dimensions, locations, offset_3D, orientations, heat_map):
+        import pdb; pdb.set_trace()
+
+        heat_map = torch.tensor(heat_map)
+        heat_map_mp = torch.nn.functional.max_pool2d(heat_map, 3, padding = 1)
+        heat_map *= (heat_map == heat_map_mp)
+        # c, h, w
+
+        topk_v, topk_ind = heat_map.flatten(1,2).topk(50,1)
+        # c, 100
+
+        valid_det = topk_v > 0.2
+        topk_v = topk_v[valid_det]
+        topk_ind = topk_ind[valid_det]
+
+        topk_ind_y = topk_ind // heat_map.size(2)
+        topk_ind_x = topk_ind % heat_map.size(1)
+
+
+    def ground_getitem(self, idx):
+        if idx >= self.num_samples:
+            # utilize right color image
+            idx = idx % self.num_samples
+            img = self.get_right_image(idx)
+            calib = self.get_calibration(idx, use_right_cam=True)
+            objs = None if self.split == 'test' else self.get_label_objects(idx)
+
+            use_right_img = True
+            # generate the bboxes for right color image
+            right_objs = []
+            img_w, img_h = img.size
+            for obj in objs:
+                corners_3d = obj.generate_corners3d()
+                corners_2d, _ = calib.project_rect_to_image(corners_3d)
+                obj.box2d = np.array([max(corners_2d[:, 0].min(), 0), max(corners_2d[:, 1].min(), 0),
+                                    min(corners_2d[:, 0].max(), img_w - 1), min(corners_2d[:, 1].max(), img_h - 1)], dtype=np.float32)
+
+                obj.xmin, obj.ymin, obj.xmax, obj.ymax = obj.box2d
+                right_objs.append(obj)
+
+            objs = right_objs
+        else:
+            # utilize left color image
+            img = self.get_image(idx)
+            calib = self.get_calibration(idx)
+            objs = None if self.split == 'test' else self.get_label_objects(idx)
+
+            use_right_img = False
+
+        original_idx = self.image_files[idx][:6]
+        objs = self.filtrate_objects(objs) # remove objects of irrelevant classes
+
+        # random horizontal flip
+        if self.augmentation is not None:
+            img, objs, calib = self.augmentation(img, objs, calib)
+
+        # pad image
+        img_before_aug_pad = np.array(img).copy()
+        img_w, img_h = img.size
+        img, pad_size = self.pad_image(img)
+        # for training visualize, use the padded images
+        ori_img = np.array(img).copy() if self.is_train else img_before_aug_pad
+
+        # the boundaries of the image after padding
+        x_min, y_min = int(np.ceil(pad_size[0] / self.down_ratio)), int(np.ceil(pad_size[1] / self.down_ratio))
+        x_max, y_max = (pad_size[0] + img_w - 1) // self.down_ratio, (pad_size[1] + img_h - 1) // self.down_ratio
+
+        if self.enable_edge_fusion:
+            # generate edge_indices for the edge fusion module
+            input_edge_indices = np.zeros([self.max_edge_length, 2], dtype=np.int64)
+            edge_indices = self.get_edge_utils((img_w, img_h), pad_size).numpy()
+            input_edge_count = edge_indices.shape[0]
+            input_edge_indices[:edge_indices.shape[0]] = edge_indices
+            input_edge_count = input_edge_count - 1 # explain ?
+
+        if self.split == 'test':
+            # for inference we parametrize with original size
+            target = ParamsList(image_size=img.size, is_train=self.is_train)
+            target.add_field("pad_size", pad_size)
+            target.add_field("calib", calib)
+            target.add_field("ori_img", ori_img)
+            if self.enable_edge_fusion:
+                target.add_field('edge_len', input_edge_count)
+                target.add_field('edge_indices', input_edge_indices)
+
+            if self.transforms is not None: img, target = self.transforms(img, target)
+
+        return img, target, original_idx
+
+        target = ParamsList(image_size=img.size, is_train=self.is_train)
+        target.add_field("pad_size", pad_size)
+        target.add_field("ori_img", ori_img)
+        target.add_field("calib", calib)
+
+        for pt_index_i in range(5):
+            self.run_one(objs, pt_index_i, target, calib, img_w, img_h, pad_size)
+
+        if self.enable_edge_fusion:
+            target.add_field('edge_len', input_edge_count)
+            target.add_field('edge_indices', input_edge_indices)
+
+        if self.transforms is not None: img, target = self.transforms(img, target)
+
+        return img, target, original_idx
+
+    def __getitem__(self, idx):
+        if self.kitti_type == 'original':
+            return self.original_getitem(idx)
+        elif self.kitti_type == 'ground':
+            return self.ground_getitem(idx)
+

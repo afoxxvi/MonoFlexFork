@@ -1,13 +1,13 @@
 import os
 
 class DatasetCatalog():
-    DATA_DIR = "/opt/data1/zyp/"
+    DATA_DIR = "/home/afoxxvi/data"
     DATASETS = {
         "kitti_train": {
-            "root": "kitti/object/training/",
+            "root": "kitti_object/training/",
         },
         "kitti_test": {
-            "root": "kitti/object/testing/",
+            "root": "kitti_object/testing/",
         },
 
     }
@@ -23,6 +23,11 @@ class DatasetCatalog():
             return dict(
                 factory="KITTIDataset",
                 args=args,
+            )
+        elif name == 'simple':
+            return dict(
+                factory="SimpleKITTIDataset",
+                args=dict(root=attrs["root"]),
             )
         raise RuntimeError("Dataset not available: {}".format(name))
 

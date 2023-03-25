@@ -37,6 +37,7 @@ def default_argument_parser():
     parser.add_argument("--batch_size", type=int, default=8, help="number of batch_size")
     parser.add_argument("--num_work", type=int, default=8, help="number of workers for dataloader")
     parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--output_depth", type=str, default=None)
 
     parser.add_argument("--vis_thre", type=float, default=0.25, help="threshold for visualize results of detection")
     parser.add_argument("--num-machines", type=int, default=1)

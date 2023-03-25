@@ -23,7 +23,7 @@ class KeypointDetector(nn.Module):
         self.heads = bulid_head(cfg, self.backbone.out_channels)
         self.test = cfg.DATASETS.TEST_SPLIT == 'test'
 
-    def forward(self, images, targets=None):
+    def forward(self, images, targets=None, iters=None, max_iter=None):
         if self.training and targets is None:
             raise ValueError("In training mode, targets should be passed")
         
@@ -31,7 +31,7 @@ class KeypointDetector(nn.Module):
         features = self.backbone(images.tensors)
 
         if self.training:
-            loss_dict, log_loss_dict = self.heads(features, targets)
+            loss_dict, log_loss_dict = self.heads(features, targets, iters=iters, max_iter=max_iter)
             return loss_dict, log_loss_dict
         else:
             result, eval_utils, visualize_preds = self.heads(features, targets, test=self.test)

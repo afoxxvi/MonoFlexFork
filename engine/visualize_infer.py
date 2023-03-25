@@ -73,7 +73,7 @@ def box3d_to_corners(locs, dims, roty):
 
 
 # visualize for test-set
-def show_image_with_boxes_test(image, output, target, visualize_preds):
+def show_image_with_boxes_test(image, output, target, visualize_preds, name):
 	# output Tensor:
 	# clses, pred_alphas, pred_box2d, pred_dimensions, pred_locations, pred_rotys, scores
 	image = image.numpy().astype(np.uint8)
@@ -138,6 +138,8 @@ def show_image_with_boxes_test(image, output, target, visualize_preds):
 	heat_mixed = img2.astype(np.float32) / 255 + all_heatmap[..., np.newaxis] * np.array([1, 0, 0]).reshape(1, 1, 3)
 	img3 = img3.astype(np.float32) / 255
 	stacked_img = np.vstack((heat_mixed, img3))
+	img3 = img3[:,:,[2,1,0]]
+	cv2.imwrite(name, (img3 * 255).astype(np.uint8))
 
 	plt.figure()
 	plt.imshow(stacked_img)

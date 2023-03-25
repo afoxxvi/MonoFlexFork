@@ -58,6 +58,24 @@ def do_eval(cfg, model, data_loaders_val, iteration):
 
 	return evaluate_metric, result_str, dis_ious
 
+def do_test(cfg, model, data_loaders_val, iteration):
+	eval_types = ("detection",)
+	dataset_name = cfg.DATASETS.TEST[0]
+
+	if cfg.OUTPUT_DIR:
+		output_folder = os.path.join(cfg.OUTPUT_DIR, dataset_name, "inference_{}".format(iteration))
+		os.makedirs(output_folder, exist_ok=True)
+
+	inference(
+		model,
+		data_loaders_val,
+		dataset_name=dataset_name,
+		eval_types=eval_types,
+		device=cfg.MODEL.DEVICE,
+		output_folder=output_folder,
+		metrics = [],
+	)
+
 def do_train(
 		cfg,
 		distributed,
@@ -106,7 +124,8 @@ def do_train(
 		images = data["images"].to(device)
 		targets = [target.to(device) for target in data["targets"]]
 
-		loss_dict, log_loss_dict = model(images, targets)
+		loss_dict, log_loss_dict = model(images, targets, iters = iteration, max_iter = max_iter)
+
 		losses = sum(loss for loss in loss_dict.values())
 
 		# reduce losses over all GPUs for logging purposes
@@ -187,10 +206,10 @@ def do_train(
 						for metric in record_metrics:
 							if key.find(metric) >= 0:
 								threshold = key[len(metric) : len(metric) + 4]
-								writer.add_scalar("eval_{}_{}/{}".format(default_depth_method, threshold, key), float(value), eval_iteration + 1)
+								writer.add_scalar("eval_{}_{}/{}".format(default_depth_method, threshold, key), float(value), cur_epoch)
 
 				for key, value in dis_ious.items():
-					writer.add_scalar("IoUs_{}/{}".format(key, default_depth_method), value, eval_iteration + 1)				
+					writer.add_scalar("IoUs_{}/{}".format(key, default_depth_method), value, cur_epoch)
 
 				# record the best model according to the AP_3D, Car, Moderate, IoU=0.7
 				important_key = '{}_3d_{:.2f}/moderate'.format('Car', 0.7)
@@ -223,3 +242,8 @@ def do_train(
 
 		logger.info('The best performance is as follows')
 		logger.info('\n' + best_result_str)
+		with open(os.path.join(cfg.OUTPUT_DIR, 'best_res.txt'), 'w') as best_f:
+			best_f.write("Total training time: {} ({:.4f} s / it), best model is achieved at iteration = {} \n".format(
+				total_time_str, total_training_time / (max_iter), best_iteration,))
+			best_f.write('The best performance is as follows \n')
+			best_f.write(best_result_str)
