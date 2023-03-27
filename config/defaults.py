@@ -16,6 +16,7 @@ _C.MODEL.NORM = 'BN' # group normalization or batch normalization
 
 _C.MODEL.INPLACE_ABN = False
 _C.MODEL.ATTN_NORM = False
+_C.MODEL.OBMO = False
 
 # -----------------------------------------------------------------------------
 # INPUT

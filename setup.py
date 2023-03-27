@@ -62,7 +62,7 @@ setup(
     version="0.0",
     author="zyp",
     packages=find_packages(exclude=("configs", "tests",)),
-    ext_modules=get_extensions(),
+    # ext_modules=get_extensions(),
     cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension},
 )
 

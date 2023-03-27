@@ -44,6 +44,8 @@ class Loss_Computation():
         self.cls_loss_fnc = FocalLoss(cfg.MODEL.HEAD.LOSS_PENALTY_ALPHA,
                                       cfg.MODEL.HEAD.LOSS_BETA)  # penalty-reduced focal loss
         self.hm_kpt_loss_fnc = FocalLoss(cfg.MODEL.HEAD.LOSS_PENALTY_ALPHA, cfg.MODEL.HEAD.LOSS_BETA)
+        self.hm_kpt_offset_loss_fnc = F.l1_loss
+        self.obmo = cfg.MODEL.OBMO
         self.iou_loss = IOULoss(loss_type=loss_types[2])  # iou loss for 2D detection
 
         # depth loss
@@ -69,8 +71,7 @@ class Loss_Computation():
         self.trunc_offset_loss_type = cfg.MODEL.HEAD.TRUNCATION_OFFSET_LOSS
 
         self.loss_weights = {}
-        for key, weight in zip(cfg.MODEL.HEAD.LOSS_NAMES, cfg.MODEL.HEAD.INIT_LOSS_WEIGHT): self.loss_weights[
-            key] = weight
+        for key, weight in zip(cfg.MODEL.HEAD.LOSS_NAMES, cfg.MODEL.HEAD.INIT_LOSS_WEIGHT): self.loss_weights[key] = weight
 
         # whether to compute corner loss
         self.compute_direct_depth_loss = 'depth_loss' in self.loss_keys
@@ -99,6 +100,8 @@ class Loss_Computation():
         hm_kpt = torch.stack([t.get_field("hm_kpt") for t in targets])
         cls_ids = torch.stack([t.get_field("cls_ids") for t in targets])
         offset_3D = torch.stack([t.get_field("offset_3D") for t in targets])
+        hm_kpt_offset = torch.stack([t.get_field("hm_kpt_offset") for t in targets])
+        hm_kpt_offset_mask = torch.stack([t.get_field("hm_kpt_offset_mask") for t in targets])
         # 2d detection
         target_centers = torch.stack([t.get_field("target_centers") for t in targets])
         bboxes = torch.stack([t.get_field("2d_bboxes") for t in targets])
@@ -117,6 +120,7 @@ class Loss_Computation():
         reg_weight = torch.stack([t.get_field("reg_weight") for t in targets])
         ori_imgs = torch.stack([t.get_field("ori_img") for t in targets])
         trunc_mask = torch.stack([t.get_field("trunc_mask") for t in targets])
+        quality_scores = torch.stack([t.get_field("quality_scores") for t in targets])
 
         return_dict = dict(cls_ids=cls_ids, target_centers=target_centers, bboxes=bboxes, keypoints=keypoints,
                            dimensions=dimensions,
@@ -124,6 +128,7 @@ class Loss_Computation():
                            reg_mask=reg_mask, reg_weight=reg_weight,
                            offset_3D=offset_3D, ori_imgs=ori_imgs, trunc_mask=trunc_mask, orientations=orientations,
                            keypoints_depth_mask=keypoints_depth_mask,
+                           quality_scores=quality_scores, hm_kpt_offset=hm_kpt_offset, hm_kpt_offset_mask=hm_kpt_offset_mask,
                            )
 
         return heatmaps, hm_kpt, return_dict
@@ -186,6 +191,10 @@ class Loss_Computation():
         pred_orientation_3D = torch.cat((pred_regression_pois_3D[:, self.key2channel('ori_cls')],
                                          pred_regression_pois_3D[:, self.key2channel('ori_offset')]), dim=1)
 
+        target_hm_kpt_offset = targets_variables['hm_kpt_offset'].view(-1, 20)[flatten_reg_mask_gt]
+        pred_hm_kpt_offset = pred_regression_pois_3D[:, self.key2channel('hm_kpt_offset')]
+        target_hm_kpt_offset_mask = targets_variables['hm_kpt_offset_mask'].view(-1, 20)[flatten_reg_mask_gt]
+
         # decode the pred residual dimensions to real dimensions
         pred_dimensions_3D = self.anno_encoder.decode_dimension(target_clses, pred_dimensions_offsets_3D)
 
@@ -195,14 +204,22 @@ class Loss_Computation():
                    'dims_3D': target_dimensions_3D, 'corners_3D': target_corners_3D, 'width_2D': target_bboxes_width,
                    'rotys_3D': target_rotys_3D,
                    'cat_3D': target_bboxes_3D, 'trunc_mask_3D': target_trunc_mask, 'height_2D': target_bboxes_height,
+                   'hm_kpt_offset': target_hm_kpt_offset, 'hm_kpt_offset_mask': target_hm_kpt_offset_mask
                    }
 
         preds = {'reg_2D': pred_regression_2D, 'offset_3D': pred_offset_3D, 'orien_3D': pred_orientation_3D,
-                 'dims_3D': pred_dimensions_3D}
+                 'dims_3D': pred_dimensions_3D,
+                 'hm_kpt_offset': pred_hm_kpt_offset
+                 }
 
         reg_nums = {'reg_2D': mask_regression_2D.sum(), 'reg_3D': flatten_reg_mask_gt.sum(),
                     'reg_obj': flatten_reg_mask_gt.sum()}
         weights = {'object_weights': obj_weights}
+
+        if self.obmo:
+            target_quality_score = targets_variables['quality_scores'].view(-1)[flatten_reg_mask_gt]
+            targets['quality_score'] = target_quality_score
+            preds['quality_score'] = pred_regression_pois_3D[:, self.key2channel('quality_score')].squeeze(-1)
 
         # predict the depth with direct regression
         if self.pred_direct_depth:
@@ -313,6 +330,12 @@ class Loss_Computation():
 
             hm_kpt_loss, num_hm_kpt_pos = self.hm_kpt_loss_fnc(pred_hm_kpt, targets_hm_kpt)
             hm_kpt_loss = self.loss_weights['hm_kpt_loss'] * hm_kpt_loss / torch.clamp(num_hm_kpt_pos, 1)
+
+            hm_kpt_offset_mask = pred_targets['hm_kpt_offset_mask'].bool()
+            pred_hm_kpt_offset = preds['hm_kpt_offset']
+            hm_kpt_offset_loss = self.loss_weights['hm_kpt_offset_loss'] * self.hm_kpt_offset_loss_fnc(pred_hm_kpt_offset[hm_kpt_offset_mask],
+                                                                                                  pred_targets['hm_kpt_offset'][hm_kpt_offset_mask],
+                                                                                                  )
 
         else:
             raise ValueError
@@ -478,6 +501,10 @@ class Loss_Computation():
                         soft_depth_loss = self.loss_weights['weighted_avg_depth_loss'] * \
                                           self.reg_loss_fnc(soft_depths, pred_targets['depth_3D'], reduction='mean')
 
+            if self.obmo:
+                quality_score_loss = self.loss_weights['quality_score'] * \
+                                     self.reg_loss_fnc(preds['quality_score'], pred_targets['quality_score'], reduction='none')
+
             depth_MAE = depth_MAE.mean()
 
         loss_dict = {
@@ -495,11 +522,15 @@ class Loss_Computation():
 
         MAE_dict = {}
 
+        if self.obmo:
+            loss_dict['quality_score_loss'] = quality_score_loss
+
         if self.separate_trunc_offset:
             loss_dict['offset_loss'] = offset_3D_loss
             loss_dict['trunc_offset_loss'] = trunc_offset_loss
         else:
             loss_dict['offset_loss'] = offset_3D_loss
+        loss_dict['hm_kpt_offset_loss'] = hm_kpt_offset_loss
 
         if self.compute_corner_loss:
             loss_dict['corner_loss'] = corner_3D_loss

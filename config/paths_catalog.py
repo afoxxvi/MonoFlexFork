@@ -1,13 +1,13 @@
 import os
 
 class DatasetCatalog():
-    DATA_DIR = "/opt/data1/zyp/"
+    DATA_DIR = "/home/afoxxvi/data"
     DATASETS = {
         "kitti_train": {
-            "root": "kitti/object/training/",
+            "root": "kitti_object/training/",
         },
         "kitti_test": {
-            "root": "kitti/object/testing/",
+            "root": "kitti_object/testing/",
         },
 
     }

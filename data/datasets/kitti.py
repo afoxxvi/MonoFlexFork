@@ -307,6 +307,7 @@ class KITTIDataset(Dataset):
         hm_kpt = np.zeros([self.num_kpt, self.output_height, self.output_width], dtype=np.float32)
         # offset
         hm_kpt_offset = np.zeros([self.max_objs, self.num_kpt * 2])
+        hm_kpt_offset_mask = np.zeros([self.max_objs, self.num_kpt * 2])
         ellip_heat_map = np.zeros([self.num_classes, self.output_height, self.output_width], dtype=np.float32)
         # classification
         cls_ids = np.zeros([self.max_objs], dtype=np.int32)
@@ -328,6 +329,8 @@ class KITTIDataset(Dataset):
         alphas = np.zeros([self.max_objs], dtype=np.float32)
         # offsets from center to expected_center
         offset_3D = np.zeros([self.max_objs, 2], dtype=np.float32)
+
+        quality_scores = np.zeros([self.max_objs, 1], dtype=np.float32)
 
         # occlusion and truncation
         occlusions = np.zeros(self.max_objs)
@@ -368,6 +371,37 @@ class KITTIDataset(Dataset):
             locs = obj.t.copy()
             locs[1] = locs[1] - obj.h / 2
             if locs[-1] <= 0: continue  # objects which are behind the image
+
+            box2d = obj.box2d
+            _x2, _y2, x2_, y2_ = box2d
+            center_x2 = (_x2 + x2_) / 2
+            center_y2 = (_y2 + y2_) / 2
+            h2 = x2_ - _x2
+            w2 = y2_ - _y2
+            center_x3 = obj.t[0]
+            center_y3 = obj.t[1]
+            center_z3 = obj.t[2]
+
+            x_div_z = center_x3 / center_z3
+            y_div_z = center_y3 / center_z3
+
+            epsilon = [-0.08, -0.04, 0.0, 0.04, 0.08] if self.is_train else [0.0]
+
+            for e in epsilon:
+                d_z3 = e * center_z3
+                center_z3b = center_z3 + d_z3
+                center_x3b = center_z3b * x_div_z
+                center_y3b = center_z3b * y_div_z
+                center2b, _ = calib.project_rect_to_image(np.array([center_x3b, center_y3b, center_z3b]).reshape(1, 3))
+                center_x2b, center_y2b = center2b[0, 0], center2b[0, 1]
+                _x2b, x2b_ = center_x2b - w2 / 2, center_x2b + w2 / 2
+                _y2b, y2b_ = center_y2b - h2 / 2, center_y2b + h2 / 2
+                _x2b, x2b_ = max(_x2b, 0), min(x2b_, img_w)
+                _y2b, y2b_ = max(_y2b, 0), min(y2b_, img_h)
+
+                linear_score = 1 - abs(d_z3) / 4
+                iou_score = calc_iou(np.array([_x2, _y2, x2_, y2_]), np.array([_x2b, _y2b, x2b_, y2b_]))
+                quality_scores[i] = linear_score
 
             # generate 8 corners of 3d bbox
             corners_3d = obj.generate_corners3d()
@@ -482,9 +516,16 @@ class KITTIDataset(Dataset):
                     assert min(radius_x, radius_y) == 0
                     heat_map[cls_id] = draw_umich_gaussian_2D(heat_map[cls_id], target_center, radius_x, radius_y)
                     for k_idx in range(len(keypoints[i])):
-                        if keypoints[i, k_idx][2] == 1:
-                            hm_kpt[k_idx] = draw_umich_gaussian(hm_kpt[k_idx], keypoints_2D[k_idx],
+                        kpt = keypoints[i, k_idx]
+                        if kpt[2] == 1:
+                            kptx, kpty = kpt[0], kpt[1]
+                            kptx_int, kpty_int = int(kptx), int(kpty)
+                            hm_kpt[k_idx] = draw_umich_gaussian(hm_kpt[k_idx], (kptx_int, kpty_int),
                                                                 max(0, int(gaussian_radius(bbox_dim[1], bbox_dim[0]))))
+                            hm_kpt_offset[i, k_idx * 2] = kptx - kptx_int
+                            hm_kpt_offset[i, k_idx * 2 + 1] = kpty - kpty_int
+                            hm_kpt_offset_mask[i, k_idx * 2: k_idx * 2 + 2] = 1
+
                 # if keypoints[i, k_idx][2] == 1:
                 # 	draw_umich_gaussian(hm_kpt[k_idx], keypoints[i, k_idx], max(0, int(gaussian_radius(bbox_dim[1], bbox_dim[0]))))
                 # else:
@@ -496,11 +537,13 @@ class KITTIDataset(Dataset):
                     heat_map[cls_id] = draw_umich_gaussian(heat_map[cls_id], target_center, radius)
                     for k_idx in range(len(keypoints_2D)):
                         kpt = keypoints[i, k_idx]
-                        kptx, kpty = kpt[0], kpt[1]
-                        kptx_int, kpty_int = int(kptx), int(kpty)
-                        hm_kpt[k_idx] = draw_umich_gaussian(hm_kpt[k_idx], keypoints_2D[k_idx], radius)
-                # hm_kpt_offset[i, k_idx * 2] = kptx - kptx_int
-                # hm_kpt_offset[i, k_idx * 2 + 1] = kpty - kpty_int
+                        if kpt[2] == 1:
+                            kptx, kpty = kpt[0], kpt[1]
+                            kptx_int, kpty_int = int(kptx), int(kpty)
+                            hm_kpt[k_idx] = draw_umich_gaussian(hm_kpt[k_idx], (kptx_int, kpty_int), radius)
+                            hm_kpt_offset[i, k_idx * 2] = kptx - kptx_int
+                            hm_kpt_offset[i, k_idx * 2 + 1] = kpty - kpty_int
+                            hm_kpt_offset_mask[i, k_idx * 2: k_idx * 2 + 2] = 1
 
                 cls_ids[i] = cls_id
                 target_centers[i] = target_center
@@ -551,9 +594,11 @@ class KITTIDataset(Dataset):
         target.add_field("hm", heat_map)
         target.add_field("hm_kpt", hm_kpt)
         target.add_field("hm_kpt_offset", hm_kpt_offset)
+        target.add_field("hm_kpt_offset_mask", hm_kpt_offset_mask)
         target.add_field("gt_bboxes", gt_bboxes)  # for validation visualization
         target.add_field("occlusions", occlusions)
         target.add_field("truncations", truncations)
+        target.add_field("quality_scores", quality_scores)
 
         if self.enable_edge_fusion:
             target.add_field('edge_len', input_edge_count)
@@ -562,3 +607,21 @@ class KITTIDataset(Dataset):
         if self.transforms is not None: img, target = self.transforms(img, target)
 
         return img, target, original_idx
+
+
+def calc_iou(box1, box2):
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+
+    xx1 = np.maximum(box1[0], box2[0])
+    yy1 = np.maximum(box1[1], box2[1])
+    xx2 = np.minimum(box1[2], box2[2])
+    yy2 = np.minimum(box1[3], box2[3])
+
+    w = np.maximum(0.0, xx2 - xx1)
+    h = np.maximum(0.0, yy2 - yy1)
+    inter = w * h
+    ovr = inter / (area1 + area2 - inter)
+
+    return ovr
+
