@@ -25,6 +25,7 @@ MODEL:
   INPLACE_ABN: True
   ATTN_NORM: True
   OBMO: True
+  SEPERATE_PSEUDO_LABEL: False
   HEAD:
     NUM_KPT: 10
 
@@ -44,9 +45,9 @@ MODEL:
     MODIFY_INVALID_KEYPOINT_DEPTH: True
 
     CORNER_LOSS_DEPTH: 'soft_combine'
-    LOSS_NAMES: ['hm_loss', 'hm_kpt_loss', 'hm_kpt_offset_loss', 'bbox_loss', 'depth_loss', 'offset_loss', 'orien_loss', 'dims_loss', 'corner_loss', 'keypoint_loss', 'keypoint_depth_loss', 'trunc_offset_loss', 'weighted_avg_depth_loss']
-    LOSS_UNCERTAINTY: [True, True, True, True, False, True, True, True, True, True, False, True, True]
-    INIT_LOSS_WEIGHT: [1, 1, 0.5, 1, 1, 0.5, 1, 1, 0.2, 1.0, 0.2, 0.1, 0.2]
+    LOSS_NAMES: ['hm_loss', 'hm_kpt_loss', 'hm_kpt_offset_loss', 'bbox_loss', 'depth_loss', 'offset_loss', 'orien_loss', 'dims_loss', 'corner_loss', 'keypoint_loss', 'keypoint_depth_loss', 'trunc_offset_loss', 'weighted_avg_depth_loss', 'quality_score']
+    LOSS_UNCERTAINTY: [True, True, True, True, False, True, True, True, True, True, False, True, True, True]
+    INIT_LOSS_WEIGHT: [1, 1, 0.5, 1, 1, 0.5, 1, 1, 0.2, 1.0, 0.2, 0.1, 0.2, 1]
     
     CENTER_MODE: 'max'
     HEATMAP_TYPE: 'centernet'

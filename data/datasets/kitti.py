@@ -55,6 +55,10 @@ class KITTIDataset(Dataset):
         self.num_kpt = cfg.MODEL.HEAD.NUM_KPT
         self.num_samples = len(self.image_files)
 
+        self.seperate_pseudo_label = cfg.MODEL.SEPERATE_PSEUDO_LABEL
+        if self.seperate_pseudo_label and self.is_train:
+            self.num_samples *= 5
+
         # whether to use right-view image
         self.use_right_img = cfg.DATASETS.USE_RIGHT_IMAGE & is_train
 
@@ -231,7 +235,10 @@ class KITTIDataset(Dataset):
         return Image.fromarray(ret_img.astype(np.uint8)), pad_size
 
     def __getitem__(self, idx):
-
+        ep2 = 0.0
+        if self.seperate_pseudo_label and self.is_train:
+            ep2 = [-0.08, -0.04, 0, 0.04, 0.08][idx % 5]
+            idx = int(idx / 5)
         if idx >= self.num_samples:
             # utilize right color image
             idx = idx % self.num_samples
@@ -346,6 +353,54 @@ class KITTIDataset(Dataset):
         trunc_mask = np.zeros([self.max_objs], dtype=np.uint8)  # outside object mask
         reg_weight = np.zeros([self.max_objs], dtype=np.float32)  # regression weight
 
+        if not self.seperate_pseudo_label:
+            obj_index = 0
+            new_objs = []
+            for obj in objs:
+                cls = obj.type
+                cls_id = TYPE_ID_CONVERSION[cls]
+                if cls_id < 0: continue
+                if obj.t[-1] <= 0 or obj.t[-1] > 60: continue
+
+                box2d = obj.box2d
+                _x2, _y2, x2_, y2_ = box2d
+                center_x2 = (_x2 + x2_) / 2
+                center_y2 = (_y2 + y2_) / 2
+                h2 = x2_ - _x2
+                w2 = y2_ - _y2
+                center_x3 = obj.t[0]
+                center_y3 = obj.t[1]
+                center_z3 = obj.t[2]
+
+                x_div_z = center_x3 / center_z3
+                y_div_z = center_y3 / center_z3
+
+                epsilon = [-0.08, -0.04, 0.0, 0.04, 0.08] if self.is_train else [0.0]
+                for e in epsilon:
+                    if obj_index >= self.max_objs: break
+                    d_z3 = e * center_z3
+                    linear_score = 1 - abs(d_z3) / 4
+                    # iou_score = calc_iou(np.array([_x2, _y2, x2_, y2_]), np.array([_x2b, _y2b, x2b_, y2b_]))
+                    if linear_score <= 0: continue
+
+                    center_z3b = center_z3 + d_z3
+                    center_x3b = center_z3b * x_div_z
+                    center_y3b = center_z3b * y_div_z
+                    center2b, _ = calib.project_rect_to_image(np.array([center_x3b, center_y3b, center_z3b]).reshape(1, 3))
+                    center_x2b, center_y2b = center2b[0, 0], center2b[0, 1]
+                    _x2b, x2b_ = center_x2b - w2 / 2, center_x2b + w2 / 2
+                    _y2b, y2b_ = center_y2b - h2 / 2, center_y2b + h2 / 2
+                    _x2b, x2b_ = max(_x2b, 0), min(x2b_, img_w)
+                    _y2b, y2b_ = max(_y2b, 0), min(y2b_, img_h)
+                    new_obj = obj.copy()
+                    new_obj.t[0], new_obj.t[1], new_obj.t[2] = center_x3b, center_y3b, center_z3b
+
+                    new_objs.append(new_obj)
+                    quality_scores[obj_index] = linear_score
+                    obj_index += 1
+                # if obj_index >= self.max_objs: break
+            objs = new_objs
+
         for i, obj in enumerate(objs):
             cls = obj.type
             cls_id = TYPE_ID_CONVERSION[cls]
@@ -385,10 +440,8 @@ class KITTIDataset(Dataset):
             x_div_z = center_x3 / center_z3
             y_div_z = center_y3 / center_z3
 
-            epsilon = [-0.08, -0.04, 0.0, 0.04, 0.08] if self.is_train else [0.0]
-
-            for e in epsilon:
-                d_z3 = e * center_z3
+            if self.seperate_pseudo_label and self.is_train:
+                d_z3 = ep2 * center_z3
                 center_z3b = center_z3 + d_z3
                 center_x3b = center_z3b * x_div_z
                 center_y3b = center_z3b * y_div_z
@@ -398,9 +451,10 @@ class KITTIDataset(Dataset):
                 _y2b, y2b_ = center_y2b - h2 / 2, center_y2b + h2 / 2
                 _x2b, x2b_ = max(_x2b, 0), min(x2b_, img_w)
                 _y2b, y2b_ = max(_y2b, 0), min(y2b_, img_h)
-
+                obj.t[0], obj.t[1], obj.t[2] = center_x3b, center_y3b, center_z3b
                 linear_score = 1 - abs(d_z3) / 4
-                iou_score = calc_iou(np.array([_x2, _y2, x2_, y2_]), np.array([_x2b, _y2b, x2b_, y2b_]))
+                # iou_score = calc_iou(np.array([_x2, _y2, x2_, y2_]), np.array([_x2b, _y2b, x2b_, y2b_]))
+                # if linear_score <= 0: continue
                 quality_scores[i] = linear_score
 
             # generate 8 corners of 3d bbox

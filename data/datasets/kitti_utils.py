@@ -62,6 +62,7 @@ class Object3d(object):
     """ 3d object label """
 
     def __init__(self, label_file_line):
+        self.raw_data = label_file_line
         data = label_file_line.split(" ")
         data[1:] = [float(x) for x in data[1:]]
 
@@ -95,6 +96,9 @@ class Object3d(object):
         # difficulty level 
         self.level_str = None
         self.level = self.get_kitti_obj_level()
+
+    def copy(self):
+        return Object3d(self.raw_data)
 
     def get_kitti_obj_level(self):
         height = float(self.box2d[3]) - float(self.box2d[1]) + 1

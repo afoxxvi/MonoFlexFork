@@ -503,7 +503,7 @@ class Loss_Computation():
 
             if self.obmo:
                 quality_score_loss = self.loss_weights['quality_score'] * \
-                                     self.reg_loss_fnc(preds['quality_score'], pred_targets['quality_score'], reduction='none')
+                                     self.reg_loss_fnc(preds['quality_score'], pred_targets['quality_score'], reduction='none').mean()
 
             depth_MAE = depth_MAE.mean()
 
