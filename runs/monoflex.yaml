@@ -25,7 +25,6 @@ MODEL:
   INPLACE_ABN: True
   ATTN_NORM: True
   OBMO: True
-  SEPERATE_PSEUDO_LABEL: False
   HEAD:
     NUM_KPT: 10
 

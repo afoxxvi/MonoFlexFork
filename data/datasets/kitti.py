@@ -54,10 +54,7 @@ class KITTIDataset(Dataset):
         self.num_classes = len(self.classes)
         self.num_kpt = cfg.MODEL.HEAD.NUM_KPT
         self.num_samples = len(self.image_files)
-
-        self.seperate_pseudo_label = cfg.MODEL.SEPERATE_PSEUDO_LABEL
-        if self.seperate_pseudo_label and self.is_train:
-            self.num_samples *= 5
+        self.obmo = cfg.MODEL.OBMO
 
         # whether to use right-view image
         self.use_right_img = cfg.DATASETS.USE_RIGHT_IMAGE & is_train
@@ -235,10 +232,6 @@ class KITTIDataset(Dataset):
         return Image.fromarray(ret_img.astype(np.uint8)), pad_size
 
     def __getitem__(self, idx):
-        ep2 = 0.0
-        if self.seperate_pseudo_label and self.is_train:
-            ep2 = [-0.08, -0.04, 0, 0.04, 0.08][idx % 5]
-            idx = int(idx / 5)
         if idx >= self.num_samples:
             # utilize right color image
             idx = idx % self.num_samples
@@ -353,7 +346,7 @@ class KITTIDataset(Dataset):
         trunc_mask = np.zeros([self.max_objs], dtype=np.uint8)  # outside object mask
         reg_weight = np.zeros([self.max_objs], dtype=np.float32)  # regression weight
 
-        if not self.seperate_pseudo_label:
+        if self.obmo:
             obj_index = 0
             new_objs = []
             for obj in objs:

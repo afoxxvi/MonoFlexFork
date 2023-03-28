@@ -17,7 +17,6 @@ _C.MODEL.NORM = 'BN' # group normalization or batch normalization
 _C.MODEL.INPLACE_ABN = False
 _C.MODEL.ATTN_NORM = False
 _C.MODEL.OBMO = False
-_C.MODEL.SEPERATE_PSEUDO_LABEL = False
 
 # -----------------------------------------------------------------------------
 # INPUT
@@ -339,7 +338,7 @@ _C.OUTPUT_DIR = "./tools/logs"
 # Set seed to negative to fully randomize everything.
 # Set seed to positive to use a fixed seed. Note that a fixed seed does not
 # guarantee fully deterministic behavior.
-_C.SEED = -1
+_C.SEED = 144029
 
 # Benchmark different cudnn algorithms.
 # If input images have very different sizes, this option will have large overhead
