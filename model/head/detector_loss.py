@@ -28,7 +28,10 @@ class Loss_Computation():
         self.key2channel = Converter_key2channel(keys=cfg.MODEL.HEAD.REGRESSION_HEADS,
                                                  channels=cfg.MODEL.HEAD.REGRESSION_CHANNELS)
 
+        self.obmo = cfg.MODEL.OBMO
         self.max_objs = cfg.DATASETS.MAX_OBJECTS
+        if self.obmo:
+            self.max_objs = 110
         self.center_sample = cfg.MODEL.HEAD.CENTER_SAMPLE
         self.regress_area = cfg.MODEL.HEAD.REGRESSION_AREA
         self.heatmap_type = cfg.MODEL.HEAD.HEATMAP_TYPE
@@ -45,7 +48,6 @@ class Loss_Computation():
                                       cfg.MODEL.HEAD.LOSS_BETA)  # penalty-reduced focal loss
         self.hm_kpt_loss_fnc = FocalLoss(cfg.MODEL.HEAD.LOSS_PENALTY_ALPHA, cfg.MODEL.HEAD.LOSS_BETA)
         self.hm_kpt_offset_loss_fnc = F.l1_loss
-        self.obmo = cfg.MODEL.OBMO
         self.iou_loss = IOULoss(loss_type=loss_types[2])  # iou loss for 2D detection
 
         # depth loss

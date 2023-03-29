@@ -72,6 +72,8 @@ class KITTIDataset(Dataset):
         # maximal length of extracted feature map when appling edge fusion
         self.max_edge_length = (self.output_width + self.output_height) * 2
         self.max_objs = cfg.DATASETS.MAX_OBJECTS
+        if self.obmo:
+            self.max_objs = 110
 
         # filter invalid annotations
         self.filter_annos = cfg.DATASETS.FILTER_ANNO_ENABLE
@@ -419,36 +421,6 @@ class KITTIDataset(Dataset):
             locs = obj.t.copy()
             locs[1] = locs[1] - obj.h / 2
             if locs[-1] <= 0: continue  # objects which are behind the image
-
-            box2d = obj.box2d
-            _x2, _y2, x2_, y2_ = box2d
-            center_x2 = (_x2 + x2_) / 2
-            center_y2 = (_y2 + y2_) / 2
-            h2 = x2_ - _x2
-            w2 = y2_ - _y2
-            center_x3 = obj.t[0]
-            center_y3 = obj.t[1]
-            center_z3 = obj.t[2]
-
-            x_div_z = center_x3 / center_z3
-            y_div_z = center_y3 / center_z3
-
-            if self.seperate_pseudo_label and self.is_train:
-                d_z3 = ep2 * center_z3
-                center_z3b = center_z3 + d_z3
-                center_x3b = center_z3b * x_div_z
-                center_y3b = center_z3b * y_div_z
-                center2b, _ = calib.project_rect_to_image(np.array([center_x3b, center_y3b, center_z3b]).reshape(1, 3))
-                center_x2b, center_y2b = center2b[0, 0], center2b[0, 1]
-                _x2b, x2b_ = center_x2b - w2 / 2, center_x2b + w2 / 2
-                _y2b, y2b_ = center_y2b - h2 / 2, center_y2b + h2 / 2
-                _x2b, x2b_ = max(_x2b, 0), min(x2b_, img_w)
-                _y2b, y2b_ = max(_y2b, 0), min(y2b_, img_h)
-                obj.t[0], obj.t[1], obj.t[2] = center_x3b, center_y3b, center_z3b
-                linear_score = 1 - abs(d_z3) / 4
-                # iou_score = calc_iou(np.array([_x2, _y2, x2_, y2_]), np.array([_x2b, _y2b, x2b_, y2b_]))
-                # if linear_score <= 0: continue
-                quality_scores[i] = linear_score
 
             # generate 8 corners of 3d bbox
             corners_3d = obj.generate_corners3d()
